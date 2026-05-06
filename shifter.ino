@@ -1,15 +1,7 @@
 /*
  * ============================================================================
  * PROJET : Module Racing 50cc 2T (PVL) - Shifter, Launch, Slip & Pit Limiter
- * VERSION: 6.0 (Masterpiece - RTOS Multi-Core Safe & Zéro Heap Fragmentation)
- * ============================================================================
- * Description : 
- * - Quickshifter par mise à la masse (Kill-Switch PVL).
- * - Launch Control 2-Step (limiteur de régime à l'arrêt, sur capteur levier).
- * - Slip Control (Mini Traction Control) pour départ arrêté en ligne droite.
- * - Pit Limiter via interrupteur au guidon.
- * - Serveur Web et Server-Sent Events (SSE) sur Core 0.
- * - Boucle de contrôle moteur temps-réel sur Core 1.
+ * VERSION: 18.0 (Immutable Release - Absolute Atomicity, EMI Safe, Zero Jitter)
  * ============================================================================
  */
 
@@ -17,236 +9,256 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <Preferences.h>
+#include <atomic>
+#include <esp_task_wdt.h> 
+
+#define WDT_TIMEOUT_SECONDS 3 
 
 // ============================================================================
-// 1. DÉFINITION DES BROCHES (Configuration ESP32 S3 / Universelle Safe)
+// 1. DÉFINITION DES BROCHES & MACROS FAST GPIO
 // ============================================================================
-const int PIN_CUT          = 4;  // Sortie vers Optocoupleur/Thyristor (HIGH = Coupe l'allumage)
-const int PIN_RPM          = 5;  // Entrée signal inductif antiparasite
-const int PIN_WHEEL_FRONT  = 14; // Capteur Hall Roue Avant
-const int PIN_WHEEL_REAR   = 27; // Capteur Hall Roue Arrière
-const int PIN_SHIFTER      = 26; // Capteur Sélecteur de vitesse (Hall/Piezo)
-const int PIN_CLUTCH_HALL  = 25; // Capteur Hall Embrayage (Launch Control)
-const int PIN_PIT_BTN      = 33; // Interrupteur Pit Limiter (ON/OFF)
+const int PIN_CUT          = 4;  // /!\ PULL-DOWN PHYSIQUE 10k OBLIGATOIRE /!\
+const int PIN_RPM          = 5;  
+const int PIN_WHEEL_FRONT  = 14; 
+const int PIN_WHEEL_REAR   = 27; 
+const int PIN_SHIFTER      = 26; // /!\ RC FILTER HARDWARE (100nF) OBLIGATOIRE /!\
+const int PIN_CLUTCH_HALL  = 25; 
+const int PIN_PIT_BTN      = 33; 
+
+#define CUT_ON()  GPIO.out_w1ts = (1 << PIN_CUT)
+#define CUT_OFF() GPIO.out_w1tc = (1 << PIN_CUT)
 
 // ============================================================================
-// 2. VARIABLES GLOBALES & PARAMÈTRES WEB
+// 2. VARIABLES GLOBALES PARTAGÉES (std::atomic)
 // ============================================================================
 Preferences preferences;
 
-// Paramètres de configuration (Modifiés par le Web, lus par le Core 1)
-volatile int cfg_shiftCutTimeMs  = 50;   
-volatile int cfg_minShiftRpm     = 6000;  
-volatile int cfg_launchRpm       = 8000;  
-volatile int cfg_maxSlipPercent  = 15;    
-volatile int cfg_wheelCircumMm   = 1800;  
-volatile int cfg_pitRpm          = 4000;  
+std::atomic<int> cfg_shiftCutTimeMs(50);   
+std::atomic<int> cfg_minShiftRpm(6000);  
+std::atomic<int> cfg_launchRpm(8000);  
+std::atomic<int> cfg_maxSlipPercent(15);    
+std::atomic<int> cfg_wheelCircumMm(1800);  
+std::atomic<int> cfg_pulsesPerRev(3);     
+std::atomic<int> cfg_pitRpm(4000);  
 
-// Variables ISR (Modifiées par les interruptions matérielles)
 volatile unsigned long lastRpmTime_isr = 0;
-volatile int currentRpm_isr = 0;
+volatile int filteredRpm_isr = 0; 
 volatile unsigned long frontPulses_isr = 0;
 volatile unsigned long rearPulses_isr = 0;
+volatile unsigned long shifterTriggerTime_isr = 0; 
 
-// Variables de travail (Partagées inter-cores via Mutex)
-volatile float speedFrontKmh = 0.0;
-volatile float speedRearKmh = 0.0;
-volatile float currentSlip = 0.0;
-volatile int liveRpm = 0; 
+std::atomic<int> speedFrontKmh_x10(0);
+std::atomic<int> speedRearKmh_x10(0);
+std::atomic<int> currentSlip_x10(0);
+std::atomic<int> currentSlipRate_x10(0); 
+std::atomic<int> liveRpm(0); 
+std::atomic<int> currentMode(0); // 0=IDLE, 1=PIT, 2=LAUNCH, 3=SLIP, 4=SHIFT, 5=OVERREV
+std::atomic<bool> isCutting(false); 
 
-// État de la coupure moteur
-bool isCutting = false;
-unsigned long cutEndTime = 0;
+// État Machine (Core 1)
+unsigned long cutEndTimeMicros = 0; 
 unsigned long lastShiftTime = 0;
 unsigned long lastSpeedCalcTime = 0;
 unsigned long lastPitCutTime = 0; 
+unsigned long lastTractionCutTime = 0; 
+bool slipActive = false; 
+float lastSlipValue = 0.0f; 
 
-const int PULSES_PER_REV = 3; // Nombre d'aimants/dents par roue
-
-// Spinlock pour les sections critiques (Atomicité RTOS)
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
 // ============================================================================
-// 3. INTERRUPTIONS MATÉRIELLES (ISR)
+// 3. INTERRUPTIONS (ISR)
 // ============================================================================
 
-// Interruption : Signal RPM Inductif
 void IRAM_ATTR isr_rpm() {
   unsigned long now = micros();
   unsigned long delta = now - lastRpmTime_isr;
-  // Debounce (ignore les impulsions de bruit parasites < 2ms)
+  
+  // Rejet absolu EMI: 3000 µs = 20,000 RPM. (Tolérance augmentée)
+  if (delta < 3000) return; 
+  
   if (delta > 2000) { 
-    currentRpm_isr = 60000000 / delta; 
+    int instantRpm = 60000000 / delta; 
+    
+    if (filteredRpm_isr == 0) {
+      filteredRpm_isr = instantRpm;
+    } else {
+      filteredRpm_isr = (instantRpm >> 2) + ((filteredRpm_isr * 3) >> 2);
+    }
     lastRpmTime_isr = now;
   }
 }
 
-// Interruption : Roue Avant
 void IRAM_ATTR isr_wheel_front() { 
   portENTER_CRITICAL_ISR(&mux);
   frontPulses_isr++; 
   portEXIT_CRITICAL_ISR(&mux);
 }
 
-// Interruption : Roue Arrière
 void IRAM_ATTR isr_wheel_rear() { 
   portENTER_CRITICAL_ISR(&mux);
   rearPulses_isr++; 
   portEXIT_CRITICAL_ISR(&mux);
 }
 
-// ============================================================================
-// 4. FONCTIONS DE CONTRÔLE MOTEUR (Temps-Réel sur Core 1)
-// ============================================================================
-
-// Fonction : Fermeture du circuit à la masse (Coupure d'étincelle)
-void triggerCut(int durationMs) {
-  isCutting = true;
-  cutEndTime = millis() + durationMs;
-  digitalWrite(PIN_CUT, HIGH); 
+void IRAM_ATTR isr_shifter() {
+  unsigned long now = micros();
+  if (now - shifterTriggerTime_isr > 30000) { 
+    shifterTriggerTime_isr = now;
+  }
 }
 
-// Fonction : Calculs physiques (Vitesses et Glissement) à 20Hz
+// ============================================================================
+// 4. FONCTIONS DE CONTRÔLE MOTEUR (Core 1)
+// ============================================================================
+
+void triggerCut(int durationMs, int modeId) {
+  unsigned long proposedEndMicros = micros() + (durationMs * 1000UL);
+  
+  portENTER_CRITICAL(&mux);
+  // Protection unifiée : Timer ET Télémétrie verrouillés simultanément
+  if (!isCutting.load() || (long)(proposedEndMicros - cutEndTimeMicros) > 0) {
+      cutEndTimeMicros = proposedEndMicros;
+      currentMode.store(modeId);
+  }
+  isCutting.store(true);
+  portEXIT_CRITICAL(&mux);
+  
+  CUT_ON(); 
+}
+
+void stopCut() {
+  CUT_OFF();
+  isCutting.store(false);
+  currentMode.store(0); 
+}
+
 void calculateDynamics() {
-  if (millis() - lastSpeedCalcTime >= 50) { 
-    
-    // Lecture et RAZ atomiques des impulsions depuis les ISR
-    portENTER_CRITICAL(&mux);
-    unsigned long fp = frontPulses_isr; frontPulses_isr = 0;
-    unsigned long rp = rearPulses_isr;  rearPulses_isr = 0;
-    portEXIT_CRITICAL(&mux);
+  unsigned long now = millis();
+  unsigned long dt = now - lastSpeedCalcTime;
 
-    float distPerPulse = (float)cfg_wheelCircumMm / (float)PULSES_PER_REV; 
-    
-    speedFrontKmh = ((fp * distPerPulse) / 50.0) * 3.6;
-    speedRearKmh  = ((rp * distPerPulse) / 50.0) * 3.6;
-    
-    if (speedFrontKmh > 5.0) {
-      currentSlip = ((speedRearKmh - speedFrontKmh) / speedFrontKmh) * 100.0;
-    } else {
-      currentSlip = 0.0;
-    }
-    lastSpeedCalcTime = millis();
-  }
-}
+  if (dt < 50) return; 
 
-// Fonction : Gestion du Stand et du Départ Arrêté
-void handleLaunchAndPit() {
-  bool pitActive = digitalRead(PIN_PIT_BTN) == LOW;
-  bool clutchPulled = digitalRead(PIN_CLUTCH_HALL) == LOW;
+  int ppr = cfg_pulsesPerRev.load();
+  if (ppr < 1) return; 
 
-  // PRIORITÉ 1 : Le Pit Limiter (Avec Cooldown de 50ms)
-  if (pitActive) {
-    if (liveRpm > cfg_pitRpm && !isCutting && (millis() - lastPitCutTime) > 50) {
-      triggerCut(20); 
-      lastPitCutTime = millis();
-    }
-    return; // On ignore le reste si on est dans les stands
+  portENTER_CRITICAL(&mux);
+  unsigned long fp = frontPulses_isr; frontPulses_isr = 0;
+  unsigned long rp = rearPulses_isr;  rearPulses_isr = 0;
+  portEXIT_CRITICAL(&mux);
+
+  float distPerPulse = (float)cfg_wheelCircumMm.load() / (float)ppr; 
+  float dtSec = dt / 1000.0f; 
+  
+  float vFront = ((fp * distPerPulse / 1000.0f) / dtSec) * 3.6f;
+  float vRear  = ((rp * distPerPulse / 1000.0f) / dtSec) * 3.6f;
+  float slip   = 0.0f;
+
+  if (vFront > 5.0f) {
+    slip = ((vRear - vFront) / vFront) * 100.0f;
   }
 
-  // PRIORITÉ 2 : Le Départ (Launch ou Slip Control)
-  if (clutchPulled && speedFrontKmh < 5.0) {
-    // 2-Step Limiter : Moto à l'arrêt, levier tiré
-    if (liveRpm > cfg_launchRpm && !isCutting) {
-      triggerCut(15); 
-    }
-  } else {
-    // Slip Control : La moto avance, on gère la glisse
-    if (currentSlip > cfg_maxSlipPercent && speedFrontKmh > 5.0 && !isCutting) {
-      triggerCut(10); 
-    }
-  }
-}
-
-// Fonction : Gestion du Quickshifter à la volée
-void handleQuickshifter() {
-  bool shifterPressed = digitalRead(PIN_SHIFTER) == LOW; 
-  // Cooldown de 250ms pour autoriser le passage rapide des rapports successifs
-  if (shifterPressed && liveRpm >= cfg_minShiftRpm && (millis() - lastShiftTime) > 250) {
-    triggerCut(cfg_shiftCutTimeMs);
-    lastShiftTime = millis();
-  }
+  float rawRate = (slip - lastSlipValue) / dtSec;
+  static float filteredRate = 0.0f;
+  filteredRate = (rawRate * 0.2f) + (filteredRate * 0.8f); 
+  float slipRate = filteredRate;
+  
+  lastSlipValue = slip;
+  
+  speedFrontKmh_x10.store((int)(vFront * 10.0f));
+  speedRearKmh_x10.store((int)(vRear * 10.0f));
+  currentSlip_x10.store((int)(slip * 10.0f));
+  currentSlipRate_x10.store((int)(slipRate * 10.0f));
+  
+  lastSpeedCalcTime = now;
 }
 
 // ============================================================================
-// 5. TÂCHES FreeRTOS (Core 0 : Réseau et Capteurs Lents)
+// 5. TÂCHES FreeRTOS (Core 0)
 // ============================================================================
 AsyncWebServer server(80);
-AsyncEventSource events("/events"); // Canal Server-Sent Events
+AsyncEventSource events("/events"); 
 
-// Tâche SSE : Envoi de la télémétrie vers l'interface Web (Priorité 2)
+const char* modeStrings[] = {"IDLE", "PIT LIMIT", "LAUNCH", "SLIP CTL", "SHIFTING", "OVERREV"};
+
 void telemetryTask(void * pvParameters) {
-  char jsonBuf[64]; // Allocation statique (zéro fragmentation)
+  esp_task_wdt_add(NULL); 
+  char jsonBuf[96]; 
   
   for(;;) {
     vTaskDelay(250 / portTICK_PERIOD_MS); 
     
-    // N'envoie des données réseau que si un téléphone/PC affiche la page
+    if (uxTaskGetStackHighWaterMark(NULL) < 200) {
+       Serial.println("[WARN] SSE_Task RAM Watermark Critical!"); 
+    }
+    
     if (events.count() > 0) {
-      // Snapshot cohérent instant T (évite le "Tearing")
-      portENTER_CRITICAL(&mux);
-      int rpm   = liveRpm;
-      float spd = speedFrontKmh;
-      float slp = currentSlip;
-      portEXIT_CRITICAL(&mux);
+      int rpm = liveRpm.load();
+      float spd = speedFrontKmh_x10.load() / 10.0f;
+      float slp = currentSlip_x10.load() / 10.0f;
+      int mode = constrain(currentMode.load(), 0, 5); 
       
-      snprintf(jsonBuf, sizeof(jsonBuf), "{\"rpm\":%d,\"speed\":%.1f,\"slip\":%.1f}", rpm, spd, slp);
+      snprintf(jsonBuf, sizeof(jsonBuf), "{\"rpm\":%d,\"speed\":%.1f,\"slip\":%.1f,\"mode\":\"%s\"}", 
+               rpm, spd, slp, modeStrings[mode]);
       events.send(jsonBuf, "telemetry", millis());
     }
-  }
-}
-
-// Tâche IMU : Futur enregistrement des capteurs (Priorité 1)
-void imuTask(void * pvParameters) {
-  for(;;) {
-    // Lecture Capteur d'inclinaison & SD
-    vTaskDelay(10 / portTICK_PERIOD_MS); 
+    esp_task_wdt_reset(); 
   }
 }
 
 // ============================================================================
-// 6. SERVEUR WEB (Page HTML & Traitement POST)
+// 6. SERVEUR WEB 
 // ============================================================================
 
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Racing 50cc ECU</title>
+  <title>MotoGP ECU 50cc</title>
   <style>
-    body { font-family: Arial; text-align: center; background: #222; color: #fff;}
-    h1 { color: #f39c12; }
-    .card { background: #333; padding: 20px; border-radius: 10px; max-width: 400px; margin: auto; margin-bottom: 20px;}
-    .live-data { display: flex; justify-content: space-between; margin-top: 10px; border-top: 1px solid #555; padding-top: 10px;}
+    body { font-family: Arial; text-align: center; background: #111; color: #fff; margin-top: 20px;}
+    h1 { color: #f39c12; margin-bottom: 5px;}
+    h3 { margin-top: 0; color: #aaa;}
+    .card { background: #222; padding: 20px; border-radius: 10px; max-width: 400px; margin: auto; margin-bottom: 20px; box-shadow: 0px 4px 8px rgba(0,0,0,0.8);}
+    .live-data { display: flex; justify-content: space-between; margin-top: 10px; border-top: 1px solid #444; padding-top: 10px;}
     .val { font-size: 24px; font-weight: bold; color: #00ffcc; }
+    .status-badge { background: #555; padding: 5px 10px; border-radius: 20px; font-weight: bold; font-size: 14px; margin-top: 10px; display: inline-block;}
     label { display: block; margin-top: 15px; font-weight: bold; text-align: left; font-size: 14px;}
-    input { width: 100%; padding: 10px; margin-top: 5px; border-radius: 5px; border: none; box-sizing: border-box; background: #eee;}
+    input { width: 100%; padding: 10px; margin-top: 5px; border-radius: 5px; border: none; box-sizing: border-box; background: #eee; font-weight: bold;}
     button { background: #f39c12; color: white; border: none; padding: 15px; margin-top: 20px; width: 100%; font-size: 16px; border-radius: 5px; cursor: pointer; font-weight: bold;}
-    .status { font-size: 12px; color: #aaa; margin-top: 10px; }
+    .conn-status { font-size: 12px; color: #aaa; margin-top: 15px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px;}
   </style>
 </head>
 <body>
-  <h1>ECU Racing 50cc</h1>
+  <h1>MotoGP ECU</h1>
+  <h3>System 50cc</h3>
   
   <div class="card">
-    <h3>Télémétrie Temps Réel</h3>
+    <h3 style="color:#fff;">Télémétrie Live</h3>
+    <div class="status-badge" id="live_mode">IDLE</div>
     <div class="live-data">
       <div><span>RPM</span><br><span class="val" id="live_rpm">0</span></div>
       <div><span>Vitesse</span><br><span class="val" id="live_spd">0</span><small> km/h</small></div>
-      <div><span>Slip Ratio</span><br><span class="val" id="live_slip">0</span><small> %</small></div>
+      <div><span>Slip</span><br><span class="val" id="live_slip">0</span><small> %</small></div>
     </div>
-    <div class="status" id="conn_status">Connexion: En attente...</div>
+    <div class="conn-status" id="conn_status">Connexion: En attente...</div>
   </div>
 
   <div class="card">
-    <h3>Paramètres de Course</h3>
-    <label>Cut Shifter (10-150 ms):</label><input type="number" id="shiftCut" value="%SHIFT_CUT%">
+    <h3 style="color:#fff;">Cartographie & Limites</h3>
+    <label>Cut Shifter (ms):</label><input type="number" id="shiftCut" value="%SHIFT_CUT%">
     <label>RPM Min Shifter:</label><input type="number" id="minRpm" value="%MIN_RPM%">
-    <label>Launch RPM (2-Step):</label><input type="number" id="launchRpm" value="%LAUNCH_RPM%">
-    <label>Slip Control Max (0-50 %):</label><input type="number" id="slipMax" value="%SLIP_MAX%">
-    <label>Circ. Roue (mm):</label><input type="number" id="wheelCirc" value="%WHEEL_CIRC%">
+    <label>Launch RPM (Preload Zone):</label><input type="number" id="launchRpm" value="%LAUNCH_RPM%">
+    <label>Slip Control Tolerance (%):</label><input type="number" id="slipMax" value="%SLIP_MAX%">
     <label>Pit Limiter (RPM):</label><input type="number" id="pitRpm" value="%PIT_RPM%">
-    <button onclick="saveConfig()">Sauvegarder dans l'ECU</button>
+    
+    <div class="grid-2">
+      <div><label>Circ. Roue (mm):</label><input type="number" id="wheelCirc" value="%WHEEL_CIRC%"></div>
+      <div><label>Impulsions/Tour:</label><input type="number" id="pulses" value="%PULSES%"></div>
+    </div>
+    
+    <button onclick="saveConfig()">Flasher NVRAM</button>
   </div>
   
   <script>
@@ -258,10 +270,11 @@ const char index_html[] PROGMEM = R"rawliteral(
       data.append('slipMax', document.getElementById('slipMax').value);
       data.append('wheelCirc', document.getElementById('wheelCirc').value);
       data.append('pitRpm', document.getElementById('pitRpm').value);
+      data.append('pulses', document.getElementById('pulses').value);
       
       fetch('/save', { method: 'POST', body: data })
         .then(response => {
-          if(response.ok) alert("Sauvegarde réussie !");
+          if(response.ok) alert("Paramètres flashés avec succès !");
           else alert("Erreur lors de la sauvegarde.");
         })
         .catch(err => alert("Erreur de communication WiFi."));
@@ -271,7 +284,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       var source = new EventSource('/events');
       
       source.addEventListener('open', function(e) {
-        document.getElementById('conn_status').innerText = "Connexion: Connecté (Live)";
+        document.getElementById('conn_status').innerText = "Connexion: Link Actif";
         document.getElementById('conn_status').style.color = "#00ffcc";
       }, false);
 
@@ -281,6 +294,14 @@ const char index_html[] PROGMEM = R"rawliteral(
           document.getElementById('live_rpm').innerText = data.rpm;
           document.getElementById('live_spd').innerText = parseFloat(data.speed).toFixed(1);
           document.getElementById('live_slip').innerText = parseFloat(data.slip).toFixed(1);
+          
+          let modeBadge = document.getElementById('live_mode');
+          modeBadge.innerText = data.mode;
+          if(data.mode == "IDLE") modeBadge.style.background = "#555";
+          else if(data.mode == "LAUNCH" || data.mode == "PIT LIMIT") modeBadge.style.background = "#e74c3c";
+          else if(data.mode == "SHIFTING") modeBadge.style.background = "#3498db";
+          else if(data.mode == "SLIP CTL") modeBadge.style.background = "#f1c40f";
+          else if(data.mode == "OVERREV") modeBadge.style.background = "#8b0000"; 
         } catch(err) {}
       }, false);
 
@@ -288,6 +309,8 @@ const char index_html[] PROGMEM = R"rawliteral(
         if (e.target.readyState != EventSource.OPEN) {
           document.getElementById('conn_status').innerText = "Connexion: Perdue. Reconnexion...";
           document.getElementById('conn_status').style.color = "orange";
+          document.getElementById('live_mode').innerText = "OFFLINE";
+          document.getElementById('live_mode').style.background = "#e74c3c";
         }
       }, false);
     }
@@ -297,39 +320,40 @@ const char index_html[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 String processor(const String& var){
-  if(var == "SHIFT_CUT")  return String(cfg_shiftCutTimeMs);
-  if(var == "MIN_RPM")    return String(cfg_minShiftRpm);
-  if(var == "LAUNCH_RPM") return String(cfg_launchRpm);
-  if(var == "SLIP_MAX")   return String(cfg_maxSlipPercent);
-  if(var == "WHEEL_CIRC") return String(cfg_wheelCircumMm);
-  if(var == "PIT_RPM")    return String(cfg_pitRpm);
+  if(var == "SHIFT_CUT")  return String(cfg_shiftCutTimeMs.load());
+  if(var == "MIN_RPM")    return String(cfg_minShiftRpm.load());
+  if(var == "LAUNCH_RPM") return String(cfg_launchRpm.load());
+  if(var == "SLIP_MAX")   return String(cfg_maxSlipPercent.load());
+  if(var == "WHEEL_CIRC") return String(cfg_wheelCircumMm.load());
+  if(var == "PIT_RPM")    return String(cfg_pitRpm.load());
+  if(var == "PULSES")     return String(cfg_pulsesPerRev.load());
   return String();
 }
 
 void setupWebServer() {
-  WiFi.softAP("RacingECU", "12345678");
+  WiFi.softAP("MotoGPECU", "12345678");
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send_P(200, "text/html", index_html, processor);
   });
 
   server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request){
-    // Validation sécurisée des paramètres Web
-    if(request->hasParam("shiftCut", true))  cfg_shiftCutTimeMs = constrain(request->getParam("shiftCut", true)->value().toInt(), 10, 150);
-    if(request->hasParam("minRpm", true))    cfg_minShiftRpm    = constrain(request->getParam("minRpm", true)->value().toInt(), 2000, 15000);
-    if(request->hasParam("launchRpm", true)) cfg_launchRpm      = constrain(request->getParam("launchRpm", true)->value().toInt(), 2000, 15000);
-    if(request->hasParam("slipMax", true))   cfg_maxSlipPercent = constrain(request->getParam("slipMax", true)->value().toInt(), 0, 50);
-    if(request->hasParam("wheelCirc", true)) cfg_wheelCircumMm  = constrain(request->getParam("wheelCirc", true)->value().toInt(), 1000, 2500);
-    if(request->hasParam("pitRpm", true))    cfg_pitRpm         = constrain(request->getParam("pitRpm", true)->value().toInt(), 2000, 10000);
+    if(request->hasParam("shiftCut", true))  cfg_shiftCutTimeMs.store(constrain(request->getParam("shiftCut", true)->value().toInt(), 10, 150));
+    if(request->hasParam("minRpm", true))    cfg_minShiftRpm.store(constrain(request->getParam("minRpm", true)->value().toInt(), 2000, 15000));
+    if(request->hasParam("launchRpm", true)) cfg_launchRpm.store(constrain(request->getParam("launchRpm", true)->value().toInt(), 2000, 15000));
+    if(request->hasParam("slipMax", true))   cfg_maxSlipPercent.store(constrain(request->getParam("slipMax", true)->value().toInt(), 0, 50));
+    if(request->hasParam("wheelCirc", true)) cfg_wheelCircumMm.store(constrain(request->getParam("wheelCirc", true)->value().toInt(), 1000, 2500));
+    if(request->hasParam("pitRpm", true))    cfg_pitRpm.store(constrain(request->getParam("pitRpm", true)->value().toInt(), 2000, 10000));
+    if(request->hasParam("pulses", true))    cfg_pulsesPerRev.store(constrain(request->getParam("pulses", true)->value().toInt(), 1, 20));
     
-    // Sauvegarde en mémoire morte NVRAM
     preferences.begin("ecu_config", false);
-    preferences.putInt("shiftCut", cfg_shiftCutTimeMs);
-    preferences.putInt("minRpm", cfg_minShiftRpm);
-    preferences.putInt("launchRpm", cfg_launchRpm);
-    preferences.putInt("slipMax", cfg_maxSlipPercent);
-    preferences.putInt("wheelCirc", cfg_wheelCircumMm);
-    preferences.putInt("pitRpm", cfg_pitRpm);
+    preferences.putInt("shiftCut", cfg_shiftCutTimeMs.load());
+    preferences.putInt("minRpm", cfg_minShiftRpm.load());
+    preferences.putInt("launchRpm", cfg_launchRpm.load());
+    preferences.putInt("slipMax", cfg_maxSlipPercent.load());
+    preferences.putInt("wheelCirc", cfg_wheelCircumMm.load());
+    preferences.putInt("pitRpm", cfg_pitRpm.load());
+    preferences.putInt("pulses", cfg_pulsesPerRev.load());
     preferences.end();
     
     request->send(200, "text/plain", "OK");
@@ -340,82 +364,169 @@ void setupWebServer() {
 }
 
 // ============================================================================
-// 7. SETUP & MAIN LOOP (Coeur du Programme)
+// 7. SETUP & MAIN LOOP (Core 1)
 // ============================================================================
 
 void setup() {
   Serial.begin(115200);
   
-  // Configuration Pin Output (Cut PVL)
-  pinMode(PIN_CUT, OUTPUT);
-  digitalWrite(PIN_CUT, LOW);
+  esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);
+  esp_task_wdt_add(NULL); 
   
-  // Configuration Pins Input (avec Pull-Up interne)
+  pinMode(PIN_CUT, OUTPUT);
+  CUT_OFF(); 
+  
   pinMode(PIN_RPM, INPUT_PULLUP);
   pinMode(PIN_WHEEL_FRONT, INPUT_PULLUP);
   pinMode(PIN_WHEEL_REAR, INPUT_PULLUP);
-  pinMode(PIN_SHIFTER, INPUT_PULLUP);
+  pinMode(PIN_SHIFTER, INPUT_PULLUP); 
   pinMode(PIN_CLUTCH_HALL, INPUT_PULLUP);
   pinMode(PIN_PIT_BTN, INPUT_PULLUP);
 
-  // Attachement des interruptions matérielles
   attachInterrupt(digitalPinToInterrupt(PIN_RPM), isr_rpm, FALLING);
   attachInterrupt(digitalPinToInterrupt(PIN_WHEEL_FRONT), isr_wheel_front, RISING);
   attachInterrupt(digitalPinToInterrupt(PIN_WHEEL_REAR), isr_wheel_rear, RISING);
+  attachInterrupt(digitalPinToInterrupt(PIN_SHIFTER), isr_shifter, FALLING);
 
-  // Chargement de la configuration sauvegardée
   preferences.begin("ecu_config", true);
-  cfg_shiftCutTimeMs = preferences.getInt("shiftCut", 50);
-  cfg_minShiftRpm    = preferences.getInt("minRpm", 6000);
-  cfg_launchRpm      = preferences.getInt("launchRpm", 8000);
-  cfg_maxSlipPercent = preferences.getInt("slipMax", 15);
-  cfg_wheelCircumMm  = preferences.getInt("wheelCirc", 1800);
-  cfg_pitRpm         = preferences.getInt("pitRpm", 4000);
+  cfg_shiftCutTimeMs.store(preferences.getInt("shiftCut", 50));
+  cfg_minShiftRpm.store(preferences.getInt("minRpm", 6000));
+  cfg_launchRpm.store(preferences.getInt("launchRpm", 8000));
+  cfg_maxSlipPercent.store(preferences.getInt("slipMax", 15));
+  cfg_wheelCircumMm.store(preferences.getInt("wheelCirc", 1800));
+  cfg_pitRpm.store(preferences.getInt("pitRpm", 4000));
+  cfg_pulsesPerRev.store(preferences.getInt("pulses", 3));
+  if(cfg_pulsesPerRev.load() < 1) cfg_pulsesPerRev.store(3);
   preferences.end();
 
-  // Démarrage Réseau
   setupWebServer();
 
-  // Affectation des tâches de télémétrie sur le Core 0
-  xTaskCreatePinnedToCore(telemetryTask, "SSE_Task", 4096, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(imuTask,       "IMU_Task", 4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(telemetryTask, "SSE_Task", 6144, NULL, 2, NULL, 0);
 }
 
-// Boucle Principale Temps-Réel (Core 1)
 void loop() {
-  // 1. EXTRACTION SÉCURISÉE DU RPM (Fix Race Condition)
+  esp_task_wdt_reset(); 
+
+  // 1. MISE A JOUR DES CAPTEURS GLOBAUX
+  int rpmCopy;
+  unsigned long lastRpm;
   portENTER_CRITICAL(&mux);
-  liveRpm = currentRpm_isr;
-  unsigned long lastRpm = lastRpmTime_isr;
+  rpmCopy = filteredRpm_isr;
+  lastRpm = lastRpmTime_isr;
+  portEXIT_CRITICAL(&mux);
+  
+  liveRpm.store(rpmCopy);
+
+  unsigned long st;
+  portENTER_CRITICAL(&mux);
+  st = shifterTriggerTime_isr;
+  if (st != 0) shifterTriggerTime_isr = 0; 
   portEXIT_CRITICAL(&mux);
 
-  // 2. TIMEOUT MOTEUR (Vérification si le moteur a calé)
-  if (micros() - lastRpm > 500000) {
-    liveRpm = 0;
-    // Remise à zéro synchronisée de la source ISR
+  // Sécurité Moteur Calé
+  if (micros() - lastRpm > 250000) {
+    liveRpm.store(0);
     portENTER_CRITICAL(&mux);
-    currentRpm_isr = 0;
+    filteredRpm_isr = 0; 
     portEXIT_CRITICAL(&mux);
   }
 
-  // 3. FIN DE COUPURE (Libération de la masse)
-  if (isCutting && millis() > cutEndTime) {
-    digitalWrite(PIN_CUT, LOW);
-    isCutting = false;
+  // Libération logicielle de la coupure (Atomique)
+  unsigned long cutEndSnapshot;
+  portENTER_CRITICAL(&mux);
+  cutEndSnapshot = cutEndTimeMicros;
+  portEXIT_CRITICAL(&mux);
+
+  if (isCutting.load() && (long)(micros() - cutEndSnapshot) >= 0) {
+    stopCut();
   }
 
-  // 4. CALCULS DYNAMIQUES
   calculateDynamics();
-
-  // 5. LOGIQUE MOTEUR ET PRIORITÉS DE COUPURE
-  if (!isCutting) {
-    handleLaunchAndPit(); 
-  }
   
-  if (!isCutting) {
-    handleQuickshifter(); 
+  // 2. RECUEIL DES ETATS
+  bool currentlyCutting = isCutting.load(); 
+  int currentRpm = liveRpm.load();
+  bool pitActive = digitalRead(PIN_PIT_BTN) == LOW;
+  bool clutchPulled = digitalRead(PIN_CLUTCH_HALL) == LOW;
+  float sf = speedFrontKmh_x10.load() / 10.0f; 
+
+  int requestedCutMs = 0;
+  int requestedMode = 0;
+
+  // 3. L'ARBITRE CENTRAL (Hiérarchie de Priorité Stricte)
+
+  // Priorité 1 : OVERREV LIMITER (Sécurité mécanique)
+  if (currentRpm > 16000) {
+      requestedCutMs = 50; 
+      requestedMode = 5;
+  }
+  // Priorité 2 : PIT LIMITER 
+  else if (pitActive && currentRpm > cfg_pitRpm.load()) {
+      if (millis() - lastPitCutTime > 50) {
+          requestedCutMs = 20; 
+          requestedMode = 1;
+          lastPitCutTime = millis();
+      }
+  }
+  // Priorité 3 : QUICKSHIFTER 
+  else if (st != 0 && (micros() - st) < 25000) {
+      if (currentRpm >= cfg_minShiftRpm.load() && (millis() - lastShiftTime) > 250) {
+          requestedCutMs = cfg_shiftCutTimeMs.load(); 
+          requestedMode = 4;
+          lastShiftTime = millis();
+      }
+  }
+  // Priorité 4 : LAUNCH CONTROL 
+  else if (clutchPulled && sf < 5.0f) {
+      slipActive = false; 
+      if (!currentlyCutting && (millis() - lastTractionCutTime) > 30) {
+          int diff = currentRpm - cfg_launchRpm.load();
+          if (diff > -200) {
+              requestedCutMs = constrain(5 + (diff / 50), 5, 20); 
+              requestedMode = 2;
+              lastTractionCutTime = millis();
+          }
+      }
+  }
+  // Priorité 5 : SLIP CONTROL 
+  else {
+      float slip = currentSlip_x10.load() / 10.0f;
+      float sRate = currentSlipRate_x10.load() / 10.0f;
+      
+      float predictionDelta = constrain(sRate * 0.05f, -5.0f, 5.0f);
+      float predictedSlip = slip + predictionDelta;
+      
+      float excess = predictedSlip - cfg_maxSlipPercent.load();
+      float hysteresis = 3.0f; 
+
+      if (!slipActive && excess > 0 && sf > 5.0f) {
+          slipActive = true;
+      } else if (slipActive && (slip < (cfg_maxSlipPercent.load() - hysteresis) || sf <= 5.0f)) {
+          slipActive = false;
+      }
+
+      if (slipActive && !currentlyCutting && (millis() - lastTractionCutTime) > 30) {
+          requestedCutMs = 5; 
+          if (excess > 0) {
+              float speedFactor = constrain(sf / 50.0f, 0.5f, 1.5f);
+              float lowSpeedRamp = constrain((sf - 5.0f) / 5.0f, 0.0f, 1.0f);
+              requestedCutMs = constrain(5 + (int)(excess * 1.5f * speedFactor), 5, 25);
+              requestedCutMs = (int)(requestedCutMs * lowSpeedRamp); 
+          }
+          if (requestedCutMs >= 5) {
+              requestedMode = 3;
+              lastTractionCutTime = millis();
+          } else {
+              requestedCutMs = 0; 
+          }
+      }
   }
 
-  // Boucle libre, yield() maintient le système stable sans le ralentir
-  yield(); 
+  // 4. EXECUTION DE L'ORDRE
+  if (requestedCutMs > 0) {
+      if (requestedMode == 5 || currentMode.load() != requestedMode || !currentlyCutting) {
+          triggerCut(requestedCutMs, requestedMode);
+      }
+  }
+
 }
