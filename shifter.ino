@@ -1,7 +1,7 @@
 /*
  * ============================================================================
  * PROJET : Module Racing 50cc 2T (PVL) - Shifter, Launch, Slip & Pit Limiter
- * VERSION: 18.0 (Immutable Release - Absolute Atomicity, EMI Safe, Zero Jitter)
+ * VERSION: 22.1 (Endgame Release - Watchdog IMU, Zero-Misfire Hysteresis)
  * ============================================================================
  */
 
@@ -11,8 +11,25 @@
 #include <Preferences.h>
 #include <atomic>
 #include <esp_task_wdt.h> 
+#include <mbedtls/md.h> 
+#include <math.h> 
 
 #define WDT_TIMEOUT_SECONDS 3 
+
+// /!\ AVERTISSEMENT SÉCURITÉ (DRM) /!\
+// En production, le Flash Encryption et le Secure Boot V2 de l'ESP32 DOIVENT 
+// être activés via 'idf.py menuconfig' pour empêcher l'extraction de cette clé 
+// par dump matériel (lecture directe de la mémoire Flash SPI).
+const String COMPANY_SECRET_SALT = "AptatioRacing_TopSecret_2024";
+
+// Définition des Licences
+enum LicenseTier {
+  TIER_BASIC = 0, // Shifter + Pit Limiter
+  TIER_TRACK = 1, // + Launch Control
+  TIER_PRO   = 2  // + Predictive Slip Control
+};
+
+std::atomic<int> currentLicense(TIER_BASIC);
 
 // ============================================================================
 // 1. DÉFINITION DES BROCHES & MACROS FAST GPIO
@@ -52,7 +69,7 @@ std::atomic<int> speedRearKmh_x10(0);
 std::atomic<int> currentSlip_x10(0);
 std::atomic<int> currentSlipRate_x10(0); 
 std::atomic<int> liveRpm(0); 
-std::atomic<int> currentMode(0); // 0=IDLE, 1=PIT, 2=LAUNCH, 3=SLIP, 4=SHIFT, 5=OVERREV
+std::atomic<int> currentMode(0); 
 std::atomic<bool> isCutting(false); 
 
 // État Machine (Core 1)
@@ -61,6 +78,7 @@ unsigned long lastShiftTime = 0;
 unsigned long lastSpeedCalcTime = 0;
 unsigned long lastPitCutTime = 0; 
 unsigned long lastTractionCutTime = 0; 
+unsigned long lastOverrevTime = 0; 
 bool slipActive = false; 
 float lastSlipValue = 0.0f; 
 
@@ -74,19 +92,16 @@ void IRAM_ATTR isr_rpm() {
   unsigned long now = micros();
   unsigned long delta = now - lastRpmTime_isr;
   
-  // Rejet absolu EMI: 3000 µs = 20,000 RPM. (Tolérance augmentée)
-  if (delta < 3000) return; 
+  if (delta < 2000) return; 
   
-  if (delta > 2000) { 
-    int instantRpm = 60000000 / delta; 
-    
-    if (filteredRpm_isr == 0) {
-      filteredRpm_isr = instantRpm;
-    } else {
-      filteredRpm_isr = (instantRpm >> 2) + ((filteredRpm_isr * 3) >> 2);
-    }
-    lastRpmTime_isr = now;
+  int instantRpm = 60000000 / delta; 
+  
+  if (filteredRpm_isr == 0) {
+    filteredRpm_isr = instantRpm;
+  } else {
+    filteredRpm_isr = (instantRpm >> 2) + ((filteredRpm_isr * 3) >> 2);
   }
+  lastRpmTime_isr = now;
 }
 
 void IRAM_ATTR isr_wheel_front() { 
@@ -116,21 +131,21 @@ void triggerCut(int durationMs, int modeId) {
   unsigned long proposedEndMicros = micros() + (durationMs * 1000UL);
   
   portENTER_CRITICAL(&mux);
-  // Protection unifiée : Timer ET Télémétrie verrouillés simultanément
   if (!isCutting.load() || (long)(proposedEndMicros - cutEndTimeMicros) > 0) {
       cutEndTimeMicros = proposedEndMicros;
       currentMode.store(modeId);
   }
   isCutting.store(true);
-  portEXIT_CRITICAL(&mux);
-  
   CUT_ON(); 
+  portEXIT_CRITICAL(&mux);
 }
 
 void stopCut() {
-  CUT_OFF();
+  portENTER_CRITICAL(&mux);
+  CUT_OFF(); 
   isCutting.store(false);
   currentMode.store(0); 
+  portEXIT_CRITICAL(&mux);
 }
 
 void calculateDynamics() {
@@ -174,16 +189,59 @@ void calculateDynamics() {
 }
 
 // ============================================================================
+// X. SYSTÈME DE GESTION DE LICENCE (DRM)
+// ============================================================================
+
+String generateExpectedKey(int tier) {
+  String mac = WiFi.macAddress();
+  String payload = mac + COMPANY_SECRET_SALT + String(tier);
+  
+  byte shaResult[32];
+  mbedtls_md_context_t ctx;
+  mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 0);
+  mbedtls_md_starts(&ctx);
+  mbedtls_md_update(&ctx, (const unsigned char *)payload.c_str(), payload.length());
+  mbedtls_md_finish(&ctx, shaResult);
+  mbedtls_md_free(&ctx);
+
+  String key = "";
+  for(int i = 0; i < 6; i++) {
+    char str[3];
+    sprintf(str, "%02X", (int)shaResult[i]);
+    key += str;
+  }
+  return key;
+}
+
+bool applyLicenseKey(String inputKey) {
+  inputKey.toUpperCase();
+  if (inputKey == generateExpectedKey(TIER_PRO)) {
+    currentLicense.store(TIER_PRO);
+    return true;
+  } else if (inputKey == generateExpectedKey(TIER_TRACK)) {
+    currentLicense.store(TIER_TRACK);
+    return true;
+  } else if (inputKey == generateExpectedKey(TIER_BASIC)) {
+    currentLicense.store(TIER_BASIC);
+    return true;
+  }
+  return false;
+}
+
+// ============================================================================
 // 5. TÂCHES FreeRTOS (Core 0)
 // ============================================================================
 AsyncWebServer server(80);
 AsyncEventSource events("/events"); 
 
 const char* modeStrings[] = {"IDLE", "PIT LIMIT", "LAUNCH", "SLIP CTL", "SHIFTING", "OVERREV"};
+const char* tierStrings[] = {"BASIC", "TRACK", "PRO (MotoGP)"};
 
 void telemetryTask(void * pvParameters) {
   esp_task_wdt_add(NULL); 
-  char jsonBuf[96]; 
+  char jsonBuf[160]; 
   
   for(;;) {
     vTaskDelay(250 / portTICK_PERIOD_MS); 
@@ -197,13 +255,27 @@ void telemetryTask(void * pvParameters) {
       float spd = speedFrontKmh_x10.load() / 10.0f;
       float slp = currentSlip_x10.load() / 10.0f;
       int mode = constrain(currentMode.load(), 0, 5); 
+      int tier = currentLicense.load();
       
-      snprintf(jsonBuf, sizeof(jsonBuf), "{\"rpm\":%d,\"speed\":%.1f,\"slip\":%.1f,\"mode\":\"%s\"}", 
-               rpm, spd, slp, modeStrings[mode]);
+      snprintf(jsonBuf, sizeof(jsonBuf), "{\"rpm\":%d,\"speed\":%.1f,\"slip\":%.1f,\"mode\":\"%s\",\"tier\":\"%s\"}", 
+               rpm, spd, slp, modeStrings[mode], tierStrings[tier]);
       events.send(jsonBuf, "telemetry", millis());
     }
     esp_task_wdt_reset(); 
   }
+}
+
+void imuTask(void * pvParameters) {
+  esp_task_wdt_add(NULL); 
+  for(;;) {
+    vTaskDelay(100 / portTICK_PERIOD_MS); 
+    esp_task_wdt_reset();
+  }
+}
+
+void rebootTask(void * pvParameters) {
+  vTaskDelay(500 / portTICK_PERIOD_MS);
+  ESP.restart();
 }
 
 // ============================================================================
@@ -214,7 +286,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MotoGP ECU 50cc</title>
+  <title>Aptatio ECU 50cc</title>
   <style>
     body { font-family: Arial; text-align: center; background: #111; color: #fff; margin-top: 20px;}
     h1 { color: #f39c12; margin-bottom: 5px;}
@@ -223,16 +295,18 @@ const char index_html[] PROGMEM = R"rawliteral(
     .live-data { display: flex; justify-content: space-between; margin-top: 10px; border-top: 1px solid #444; padding-top: 10px;}
     .val { font-size: 24px; font-weight: bold; color: #00ffcc; }
     .status-badge { background: #555; padding: 5px 10px; border-radius: 20px; font-weight: bold; font-size: 14px; margin-top: 10px; display: inline-block;}
+    .tier-badge { background: #8e44ad; padding: 3px 8px; border-radius: 5px; font-size: 12px; margin-bottom: 10px; display: inline-block;}
     label { display: block; margin-top: 15px; font-weight: bold; text-align: left; font-size: 14px;}
     input { width: 100%; padding: 10px; margin-top: 5px; border-radius: 5px; border: none; box-sizing: border-box; background: #eee; font-weight: bold;}
+    input:disabled { background: #555; color: #888; cursor: not-allowed; }
     button { background: #f39c12; color: white; border: none; padding: 15px; margin-top: 20px; width: 100%; font-size: 16px; border-radius: 5px; cursor: pointer; font-weight: bold;}
-    .conn-status { font-size: 12px; color: #aaa; margin-top: 15px; }
-    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px;}
+    .btn-upgrade { background: #27ae60; margin-top: 10px;}
+    .mac-addr { font-size: 10px; color: #666; margin-top: 10px; }
   </style>
 </head>
 <body>
-  <h1>MotoGP ECU</h1>
-  <h3>System 50cc</h3>
+  <h1>Aptatio ECU</h1>
+  <div class="tier-badge" id="live_tier">Licence: BASIC</div>
   
   <div class="card">
     <h3 style="color:#fff;">Télémétrie Live</h3>
@@ -242,16 +316,22 @@ const char index_html[] PROGMEM = R"rawliteral(
       <div><span>Vitesse</span><br><span class="val" id="live_spd">0</span><small> km/h</small></div>
       <div><span>Slip</span><br><span class="val" id="live_slip">0</span><small> %</small></div>
     </div>
-    <div class="conn-status" id="conn_status">Connexion: En attente...</div>
   </div>
 
   <div class="card">
     <h3 style="color:#fff;">Cartographie & Limites</h3>
     <label>Cut Shifter (ms):</label><input type="number" id="shiftCut" value="%SHIFT_CUT%">
     <label>RPM Min Shifter:</label><input type="number" id="minRpm" value="%MIN_RPM%">
-    <label>Launch RPM (Preload Zone):</label><input type="number" id="launchRpm" value="%LAUNCH_RPM%">
-    <label>Slip Control Tolerance (%):</label><input type="number" id="slipMax" value="%SLIP_MAX%">
     <label>Pit Limiter (RPM):</label><input type="number" id="pitRpm" value="%PIT_RPM%">
+    
+    <hr style="border-color: #444; margin-top: 20px;">
+    <h4 style="color: #f39c12; text-align: left; margin-bottom: 5px;">🔓 Track & Pro Features</h4>
+    
+    <label>Launch RPM (Preload Zone) [TRACK+]:</label>
+    <input type="number" id="launchRpm" value="%LAUNCH_RPM%" %TRACK_DISABLED%>
+    
+    <label>Slip Control Tolerance (%) [PRO]:</label>
+    <input type="number" id="slipMax" value="%SLIP_MAX%" %PRO_DISABLED%>
     
     <div class="grid-2">
       <div><label>Circ. Roue (mm):</label><input type="number" id="wheelCirc" value="%WHEEL_CIRC%"></div>
@@ -260,40 +340,60 @@ const char index_html[] PROGMEM = R"rawliteral(
     
     <button onclick="saveConfig()">Flasher NVRAM</button>
   </div>
+
+  <div class="card">
+    <h3 style="color:#fff;">Upgrade Licence</h3>
+    <p style="font-size:12px; color:#aaa;">Passez à la version TRACK ou PRO pour débloquer le Launch et le Slip Control.</p>
+    <input type="text" id="licenseKey" placeholder="Entrez la clé à 12 caractères" maxlength="12">
+    <button class="btn-upgrade" onclick="upgradeLicense()">Activer</button>
+    <div class="mac-addr">HWID: %MAC_ADDR%</div>
+  </div>
   
   <script>
     function saveConfig() {
       const data = new URLSearchParams();
       data.append('shiftCut', document.getElementById('shiftCut').value);
       data.append('minRpm', document.getElementById('minRpm').value);
-      data.append('launchRpm', document.getElementById('launchRpm').value);
-      data.append('slipMax', document.getElementById('slipMax').value);
-      data.append('wheelCirc', document.getElementById('wheelCirc').value);
       data.append('pitRpm', document.getElementById('pitRpm').value);
+      data.append('wheelCirc', document.getElementById('wheelCirc').value);
       data.append('pulses', document.getElementById('pulses').value);
+      
+      if(!document.getElementById('launchRpm').disabled) data.append('launchRpm', document.getElementById('launchRpm').value);
+      if(!document.getElementById('slipMax').disabled) data.append('slipMax', document.getElementById('slipMax').value);
       
       fetch('/save', { method: 'POST', body: data })
         .then(response => {
           if(response.ok) alert("Paramètres flashés avec succès !");
-          else alert("Erreur lors de la sauvegarde.");
-        })
-        .catch(err => alert("Erreur de communication WiFi."));
+        });
+    }
+
+    function upgradeLicense() {
+      const key = document.getElementById('licenseKey').value;
+      if(key.length !== 12) { alert("Format de clé invalide."); return; }
+      
+      const data = new URLSearchParams();
+      data.append('key', key);
+      
+      fetch('/upgrade', { method: 'POST', body: data })
+        .then(response => response.text())
+        .then(text => {
+          if(text === "OK") { 
+            alert("Licence Upgradée ! L'ECU va redémarrer."); 
+            setTimeout(() => location.reload(), 3000); 
+          }
+          else alert("Clé refusée.");
+        });
     }
 
     if (!!window.EventSource) {
       var source = new EventSource('/events');
-      
-      source.addEventListener('open', function(e) {
-        document.getElementById('conn_status').innerText = "Connexion: Link Actif";
-        document.getElementById('conn_status').style.color = "#00ffcc";
-      }, false);
-
       source.addEventListener('telemetry', function(e) {
         try {
           const data = JSON.parse(e.data);
           document.getElementById('live_rpm').innerText = data.rpm;
           document.getElementById('live_spd').innerText = parseFloat(data.speed).toFixed(1);
           document.getElementById('live_slip').innerText = parseFloat(data.slip).toFixed(1);
+          document.getElementById('live_tier').innerText = "Licence: " + data.tier;
           
           let modeBadge = document.getElementById('live_mode');
           modeBadge.innerText = data.mode;
@@ -304,15 +404,6 @@ const char index_html[] PROGMEM = R"rawliteral(
           else if(data.mode == "OVERREV") modeBadge.style.background = "#8b0000"; 
         } catch(err) {}
       }, false);
-
-      source.addEventListener('error', function(e) {
-        if (e.target.readyState != EventSource.OPEN) {
-          document.getElementById('conn_status').innerText = "Connexion: Perdue. Reconnexion...";
-          document.getElementById('conn_status').style.color = "orange";
-          document.getElementById('live_mode').innerText = "OFFLINE";
-          document.getElementById('live_mode').style.background = "#e74c3c";
-        }
-      }, false);
     }
   </script>
 </body>
@@ -320,6 +411,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 String processor(const String& var){
+  int tier = currentLicense.load();
   if(var == "SHIFT_CUT")  return String(cfg_shiftCutTimeMs.load());
   if(var == "MIN_RPM")    return String(cfg_minShiftRpm.load());
   if(var == "LAUNCH_RPM") return String(cfg_launchRpm.load());
@@ -327,11 +419,16 @@ String processor(const String& var){
   if(var == "WHEEL_CIRC") return String(cfg_wheelCircumMm.load());
   if(var == "PIT_RPM")    return String(cfg_pitRpm.load());
   if(var == "PULSES")     return String(cfg_pulsesPerRev.load());
+  if(var == "MAC_ADDR")   return WiFi.macAddress();
+  
+  if(var == "TRACK_DISABLED") return (tier < TIER_TRACK) ? "disabled" : "";
+  if(var == "PRO_DISABLED")   return (tier < TIER_PRO) ? "disabled" : "";
+  
   return String();
 }
 
 void setupWebServer() {
-  WiFi.softAP("MotoGPECU", "12345678");
+  WiFi.softAP("AptatioECU", "12345678");
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send_P(200, "text/html", index_html, processor);
@@ -340,11 +437,16 @@ void setupWebServer() {
   server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request){
     if(request->hasParam("shiftCut", true))  cfg_shiftCutTimeMs.store(constrain(request->getParam("shiftCut", true)->value().toInt(), 10, 150));
     if(request->hasParam("minRpm", true))    cfg_minShiftRpm.store(constrain(request->getParam("minRpm", true)->value().toInt(), 2000, 15000));
-    if(request->hasParam("launchRpm", true)) cfg_launchRpm.store(constrain(request->getParam("launchRpm", true)->value().toInt(), 2000, 15000));
-    if(request->hasParam("slipMax", true))   cfg_maxSlipPercent.store(constrain(request->getParam("slipMax", true)->value().toInt(), 0, 50));
     if(request->hasParam("wheelCirc", true)) cfg_wheelCircumMm.store(constrain(request->getParam("wheelCirc", true)->value().toInt(), 1000, 2500));
     if(request->hasParam("pitRpm", true))    cfg_pitRpm.store(constrain(request->getParam("pitRpm", true)->value().toInt(), 2000, 10000));
     if(request->hasParam("pulses", true))    cfg_pulsesPerRev.store(constrain(request->getParam("pulses", true)->value().toInt(), 1, 20));
+    
+    if(currentLicense.load() >= TIER_TRACK && request->hasParam("launchRpm", true)) {
+        cfg_launchRpm.store(constrain(request->getParam("launchRpm", true)->value().toInt(), 2000, 15000));
+    }
+    if(currentLicense.load() >= TIER_PRO && request->hasParam("slipMax", true)) {
+        cfg_maxSlipPercent.store(constrain(request->getParam("slipMax", true)->value().toInt(), 0, 50));
+    }
     
     preferences.begin("ecu_config", false);
     preferences.putInt("shiftCut", cfg_shiftCutTimeMs.load());
@@ -357,6 +459,26 @@ void setupWebServer() {
     preferences.end();
     
     request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/upgrade", HTTP_POST, [](AsyncWebServerRequest *request){
+    if(request->hasParam("key", true)) {
+        String key = request->getParam("key", true)->value();
+        if(applyLicenseKey(key)) {
+            preferences.begin("ecu_config", false);
+            preferences.putString("licenseKey", key); 
+            preferences.putInt("licenseTier", currentLicense.load());
+            preferences.end();
+            
+            request->send(200, "text/plain", "OK");
+            
+            // Délégation du reboot à une tâche FreeRTOS indépendante 
+            // pour ne pas bloquer le thread de réponse AsyncWebServer.
+            xTaskCreate(rebootTask, "Reboot_Task", 2048, NULL, 1, NULL);
+            return;
+        }
+    }
+    request->send(403, "text/plain", "REFUSED");
   });
 
   server.addHandler(&events);
@@ -388,6 +510,8 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PIN_WHEEL_REAR), isr_wheel_rear, RISING);
   attachInterrupt(digitalPinToInterrupt(PIN_SHIFTER), isr_shifter, FALLING);
 
+  WiFi.mode(WIFI_AP);
+
   preferences.begin("ecu_config", true);
   cfg_shiftCutTimeMs.store(preferences.getInt("shiftCut", 50));
   cfg_minShiftRpm.store(preferences.getInt("minRpm", 6000));
@@ -397,17 +521,25 @@ void setup() {
   cfg_pitRpm.store(preferences.getInt("pitRpm", 4000));
   cfg_pulsesPerRev.store(preferences.getInt("pulses", 3));
   if(cfg_pulsesPerRev.load() < 1) cfg_pulsesPerRev.store(3);
+  
+  String savedKey = preferences.getString("licenseKey", "");
+  if (savedKey != "" && applyLicenseKey(savedKey)) {
+      Serial.println("Licence Valide : Tier " + String(currentLicense.load()));
+  } else {
+      currentLicense.store(TIER_BASIC);
+      Serial.println("Licence Base : Tier 0 (BASIC)");
+  }
   preferences.end();
 
   setupWebServer();
 
   xTaskCreatePinnedToCore(telemetryTask, "SSE_Task", 6144, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(imuTask, "IMU_Task", 2048, NULL, 1, NULL, 0);
 }
 
 void loop() {
   esp_task_wdt_reset(); 
 
-  // 1. MISE A JOUR DES CAPTEURS GLOBAUX
   int rpmCopy;
   unsigned long lastRpm;
   portENTER_CRITICAL(&mux);
@@ -416,6 +548,7 @@ void loop() {
   portEXIT_CRITICAL(&mux);
   
   liveRpm.store(rpmCopy);
+  int tier = currentLicense.load(); 
 
   unsigned long st;
   portENTER_CRITICAL(&mux);
@@ -423,15 +556,14 @@ void loop() {
   if (st != 0) shifterTriggerTime_isr = 0; 
   portEXIT_CRITICAL(&mux);
 
-  // Sécurité Moteur Calé
-  if (micros() - lastRpm > 250000) {
+  // Moteur calé repassé à 500ms pour une détection plus sûre à très bas régime
+  if (micros() - lastRpm > 500000) {
     liveRpm.store(0);
     portENTER_CRITICAL(&mux);
     filteredRpm_isr = 0; 
     portEXIT_CRITICAL(&mux);
   }
 
-  // Libération logicielle de la coupure (Atomique)
   unsigned long cutEndSnapshot;
   portENTER_CRITICAL(&mux);
   cutEndSnapshot = cutEndTimeMicros;
@@ -443,7 +575,6 @@ void loop() {
 
   calculateDynamics();
   
-  // 2. RECUEIL DES ETATS
   bool currentlyCutting = isCutting.load(); 
   int currentRpm = liveRpm.load();
   bool pitActive = digitalRead(PIN_PIT_BTN) == LOW;
@@ -453,14 +584,13 @@ void loop() {
   int requestedCutMs = 0;
   int requestedMode = 0;
 
-  // 3. L'ARBITRE CENTRAL (Hiérarchie de Priorité Stricte)
-
-  // Priorité 1 : OVERREV LIMITER (Sécurité mécanique)
   if (currentRpm > 16000) {
-      requestedCutMs = 50; 
-      requestedMode = 5;
+      if (millis() - lastOverrevTime > 40) {
+          requestedCutMs = 50; 
+          requestedMode = 5;
+          lastOverrevTime = millis();
+      }
   }
-  // Priorité 2 : PIT LIMITER 
   else if (pitActive && currentRpm > cfg_pitRpm.load()) {
       if (millis() - lastPitCutTime > 50) {
           requestedCutMs = 20; 
@@ -468,7 +598,6 @@ void loop() {
           lastPitCutTime = millis();
       }
   }
-  // Priorité 3 : QUICKSHIFTER 
   else if (st != 0 && (micros() - st) < 25000) {
       if (currentRpm >= cfg_minShiftRpm.load() && (millis() - lastShiftTime) > 250) {
           requestedCutMs = cfg_shiftCutTimeMs.load(); 
@@ -476,10 +605,9 @@ void loop() {
           lastShiftTime = millis();
       }
   }
-  // Priorité 4 : LAUNCH CONTROL 
-  else if (clutchPulled && sf < 5.0f) {
+  else if (tier >= TIER_TRACK && clutchPulled && sf < 5.0f) {
       slipActive = false; 
-      if (!currentlyCutting && (millis() - lastTractionCutTime) > 30) {
+      if (!currentlyCutting && (millis() - lastTractionCutTime) > 50) {
           int diff = currentRpm - cfg_launchRpm.load();
           if (diff > -200) {
               requestedCutMs = constrain(5 + (diff / 50), 5, 20); 
@@ -488,8 +616,7 @@ void loop() {
           }
       }
   }
-  // Priorité 5 : SLIP CONTROL 
-  else {
+  else if (tier >= TIER_PRO) {
       float slip = currentSlip_x10.load() / 10.0f;
       float sRate = currentSlipRate_x10.load() / 10.0f;
       
@@ -505,28 +632,31 @@ void loop() {
           slipActive = false;
       }
 
-      if (slipActive && !currentlyCutting && (millis() - lastTractionCutTime) > 30) {
-          requestedCutMs = 5; 
+      if (slipActive && !currentlyCutting && (millis() - lastTractionCutTime) > 50) {
           if (excess > 0) {
               float speedFactor = constrain(sf / 50.0f, 0.5f, 1.5f);
               float lowSpeedRamp = constrain((sf - 5.0f) / 5.0f, 0.0f, 1.0f);
-              requestedCutMs = constrain(5 + (int)(excess * 1.5f * speedFactor), 5, 25);
-              requestedCutMs = (int)(requestedCutMs * lowSpeedRamp); 
-          }
-          if (requestedCutMs >= 5) {
-              requestedMode = 3;
-              lastTractionCutTime = millis();
+              
+              // Utilisation du Float complet pour l'arrondi (évite la troncature)
+              float cutFloat = (5.0f + (excess * 1.5f * speedFactor)) * lowSpeedRamp;
+              
+              if (cutFloat >= 5.0f) {
+                  requestedCutMs = constrain((int)roundf(cutFloat), 5, 25);
+                  requestedMode = 3;
+                  lastTractionCutTime = millis();
+              } else {
+                  requestedCutMs = 0; 
+              }
           } else {
+              // Zone d'hystérésis (Pneu a repris l'adhérence) : Maintien armé sans coupure réelle
               requestedCutMs = 0; 
           }
       }
   }
 
-  // 4. EXECUTION DE L'ORDRE
   if (requestedCutMs > 0) {
       if (requestedMode == 5 || currentMode.load() != requestedMode || !currentlyCutting) {
           triggerCut(requestedCutMs, requestedMode);
       }
   }
-
 }
