@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-resistor", "id": "r1", "top": 90, "left": 200, "attrs": { "value": "220" } },
+    { "type": "wokwi-led", "id": "ledCut", "top": 60, "left": 280, "attrs": { "color": "red", "label": "CUT" } },
+    { "type": "wokwi-pushbutton", "id": "bShift",  "top": 240, "left": -160, "attrs": { "color": "green",  "label": "SHIFTER" } },
+    { "type": "wokwi-pushbutton", "id": "bClutch", "top": 310, "left": -160, "attrs": { "color": "yellow", "label": "EMBRAYAGE" } },
+    { "type": "wokwi-pushbutton", "id": "bPit",    "top": 380, "left": -160, "attrs": { "color": "red",    "label": "PIT" } }
+  ],
+  "connections": [
+    [ "esp:D4", "r1:1", "red", [ "h0" ] ],
+    [ "r1:2", "ledCut:A", "red", [ "h0" ] ],
+    [ "ledCut:C", "esp:GND.1", "black", [ "h0" ] ],
+
+    [ "esp:D26", "bShift:1.l",  "green", [ "h0" ] ],
+    [ "bShift:2.l",  "esp:GND.2", "black", [ "h0" ] ],
+    [ "esp:D25", "bClutch:1.l", "green", [ "h0" ] ],
+    [ "bClutch:2.l", "esp:GND.2", "black", [ "h0" ] ],
+    [ "esp:D33", "bPit:1.l",    "green", [ "h0" ] ],
+    [ "bPit:2.l",    "esp:GND.3", "black", [ "h0" ] ]
+  ]
+}

@@ -1,0 +1,9 @@
+[wokwi]
+version = 1
+firmware = ".pio/build/wokwi/firmware.bin"
+elf = ".pio/build/wokwi/firmware.elf"
+
+# Redirige http://localhost:8180 (ton navigateur) vers le serveur web de l'ESP simule.
+[[net.forward]]
+from = "localhost:8180"
+to = "target:80"
