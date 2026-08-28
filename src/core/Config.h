@@ -29,8 +29,8 @@ namespace cfg {
   constexpr int      OVERREV_RPM        = 16000;   // limiteur dur "survie moteur"
   constexpr int      RPM_MAX_PLAUSIBLE  = 20000;   // au-dela = parasite EMI (spec)
   constexpr uint32_t RPM_MIN_DELTA_US   = (60UL * 1000000UL) / RPM_MAX_PLAUSIBLE; // ~3000 us
-  constexpr int      RPM_SLEW_MAX       = 4000;    // hausse max plausible entre 2 impulsions
-  constexpr uint32_t RPM_STALL_US       = 500000;  // sans impulsion => moteur cale
+  constexpr float    RPM_SLEW_RPM_PER_S = 120000.0f; // pente max admise (tr/min/s) : clamp, pas rejet
+  constexpr uint32_t RPM_STALL_US       = 500000;  // sans impulsion VALIDEE => moteur cale
   constexpr int      RPM_FILTER_SHIFT   = 2;       // EWMA : alpha = 1 / 2^shift = 0.25
 
   // ---- Overrev limiter -------------------------------------------------
@@ -125,7 +125,7 @@ namespace cfg {
   constexpr uint32_t SSE_PERIOD_MS        = 250;
   constexpr uint32_t SUPERVISOR_STACK     = 3072;
   constexpr uint32_t SUPERVISOR_PERIOD_MS = 200;
-  constexpr uint32_t LOOP_STALL_MS        = 1000; // loop() fige au-dela => fail-safe + reboot
+  constexpr uint32_t LOOP_STALL_MS        = 400;  // loop() (Core 1 dedie) fige au-dela => fail-safe + reboot
 
   // ---- Reseau / auth ------------------------------------------------
   constexpr uint8_t  AP_MAX_CLIENTS      = 2;

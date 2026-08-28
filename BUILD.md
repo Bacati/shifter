@@ -227,7 +227,7 @@ curl -H "Authorization: Bearer <token>" -F "firmware=@firmware.bin" http://192.1
 
 | # | Avant | Après |
 |---|---|---|
-| 1 | Filtre EMI : rejet > 30000 tr/min (`delta < 2000 µs`) | Rejet > `RPM_MAX_PLAUSIBLE` (20000, conforme spec) + rejet des hausses hors slew (`RPM_SLEW_MAX`) ; delta mesuré depuis la **dernière impulsion validée** |
+| 1 | Filtre EMI : rejet > 30000 tr/min (`delta < 2000 µs`) | Rejet ISR > 20000 tr/min ; delta mesuré depuis la **dernière impulsion validée** ; **détection de calage sur `s_rpmLastAcceptedUs`** (une tempête EMI ne maintient plus un « moteur fantôme ») ; **limiteur de pente temporel qui CLAMPE** (`RPM_SLEW_RPM_PER_S`) au lieu de rejeter — un spike EMI est borné, une impulsion manquée ne fige plus l'estimation à une fausse valeur |
 | 2 | Overrev sur RPM filtré (EWMA, en retard) | Overrev sur **RPM instantané** (`state::getRpmInstant()`) — aucun retard |
 | 3 | Fenêtre quickshifter 25 ms non implémentée (appui avalé sous `minShiftRpm`) | Latch d'appui conservé sur 25 ms : la coupure part si le régime monte dans la fenêtre ; one-shot + lockout 250 ms |
 | 4 | ISR roues sans anti-rebond | Anti-rebond optionnel `cfg::WHEEL_MIN_PULSE_US` (0 par défaut = comportement VR/Hall inchangé) |
@@ -237,7 +237,7 @@ curl -H "Authorization: Bearer <token>" -F "firmware=@firmware.bin" http://192.1
 | 8 | Dispatch arbitre par heuristique `currentMode != requestedMode` | Priorité portée par `ignition::request()` : un mode ≥ (ré)arme et prolonge, jamais ne raccourcit ; un mode < est ignoré pendant une coupure prioritaire |
 | 9 | Race ISR ↔ `loop()` (spinlock pris seulement côté `loop`) | ISR **et** lecteurs prennent le même spinlock (`portENTER_CRITICAL_ISR`) ; RPM/EMI/EWMA sortis de l'ISR |
 | 10 | Reboot via `xTaskCreate` depuis un handler AsyncTCP | Latch `net::requestReboot()` relu dans `loop()` |
-| 11 | `imuTask` vide | `supervisorTask` : surveille le heartbeat de `loop()`, force `ignition::forceClear()` + reboot si figé > 1 s |
+| 11 | `imuTask` vide | `supervisorTask` : heartbeat battu en **fin de `loop()`** (= « cycle complet abouti », couverture uniforme quel que soit l'endroit du blocage) ; `LOOP_STALL_MS` = **400 ms** → `ignition::forceClear()` + reboot |
 | 12 | Vitesse roue = comptage d'impulsions / fenêtre 50 ms (quantifié, bruité à basse vitesse) | **Mesure de période** : `v` sur `(count-1)` intervalles exacts ; rejet des vitesses impossibles + limitation de pente. Signal de glisse bien plus propre → filtre de dérivée allégé (`SLIP_RATE_FILTER_A` 0.2 → 0.35), horizon d'avance réduit (50 → 30 ms) |
 | 13 | Slip control : aucune notion d'angle | **Garde-fou anti-angle (IMU MPU6050)** : `leanAuthority()` — autorité pleine < 12°, dégressive jusqu'à 28°, nulle au-delà ; nulle aussi si `|accel| > 1,3 g` ; **nulle si l'IMU est absent/muet** (`IMU_REQUIRED=1`). Hystérésis de ré-armement à 8°. N'affecte QUE le slip control (launch = à l'arrêt, moto droite ; overrev/pit/shift = inchangés). |
 

@@ -186,9 +186,16 @@ Ne pas sauter d'étape. À chaque phase : moteur coupé sauf mention contraire.
 ### 4.2 Capteurs (signaux injectés)
 
 7. **RPM** : carré sur D5, balayer la fréquence → la télémétrie RPM suit. À la
-   fréquence = `OVERREV_RPM` → D4 pulse (oscillo). Burst > 20 000 tr/min
-   équivalent → rejeté (pas de coupure, pas de pic RPM). Bruit / EMI simulé → le
-   filtre tient.
+   fréquence = `OVERREV_RPM` → D4 pulse (oscillo). Vérifier en plus :
+   - **Burst EMI dense** (parasites µs) superposé à un RPM valide → le RPM ne
+     décroche pas, pas de coupure parasite.
+   - **Bruit EMI seul, sans signal RPM valide** → après `RPM_STALL_US` le RPM
+     retombe bien à **0** (pas de « moteur fantôme »).
+   - **Impulsion manquée** (couper 1 impulsion sur N du générateur) → le RPM
+     affiché ne se **fige pas** à la moitié : il replonge un instant puis
+     retrouve la vraie valeur en 2–3 impulsions.
+   - Accélération franche (rampe de fréquence rapide) → l'estimation suit sans
+     être écrêtée (pente admise 120 000 tr/min/s).
 8. **Vitesses roues** : carrés sur D14 / D27 à fréquences connues → vitesses
    télémétrées = `circonférence × f / pulsesPerRev`. Roue arrière plus rapide →
    `slip %` apparaît.

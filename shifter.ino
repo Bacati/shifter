@@ -98,6 +98,10 @@ void loop() {
   sensors::update();         // RPM / vitesses / glisse / entrees
   sim::update();             // no-op sauf si -DWOKWI_SIM (ecrase rpm/vitesses simules)
   ignition::service();       // coupe l'allumage a l'echeance
-  arbiter::update();         // decide de la prochaine coupure (+ heartbeat)
+  arbiter::update();         // decide de la prochaine coupure
   ignition::service();       // re-check immediat pour les coupures tres courtes
+
+  // Heartbeat en FIN d'iteration : represente "un cycle complet a abouti".
+  // Un blocage n'importe ou dans loop() -> plus de heartbeat -> le superviseur agit.
+  state::beatEngineLoop();
 }

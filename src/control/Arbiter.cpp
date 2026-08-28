@@ -156,8 +156,6 @@ Decision evalSlip(const EcuConfig& c, float speedFrontKmh) {
 }  // namespace
 
 void arbiter::update() {
-  state::beatEngineLoop();
-
   const EcuConfig   c   = state::getConfig();
   const LicenseTier lic = license::tier();
   const int         rpm = state::getRpmFiltered();

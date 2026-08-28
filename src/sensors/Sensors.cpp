@@ -9,8 +9,10 @@ namespace {
 portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // ---- RPM (ecrit par isr_rpm) -------------------------------------------
-volatile uint32_t s_rpmLastEdgeUs     = 0;  // derniere activite (detection de calage)
-volatile uint32_t s_rpmLastAcceptedUs = 0;  // derniere impulsion validee
+//  s_rpmLastAcceptedUs sert A LA FOIS de reference d'intervalle ET de detection
+//  de calage : une impulsion EMI rejetee ne doit pas faire croire que le moteur
+//  "vit". Il n'y a donc volontairement pas de "s_rpmLastEdgeUs" separe.
+volatile uint32_t s_rpmLastAcceptedUs = 0;  // derniere impulsion VALIDEE
 volatile uint32_t s_rpmLastDeltaUs    = 0;
 volatile uint32_t s_rpmEdgeSeq        = 0;
 
@@ -54,10 +56,9 @@ Debounced s_clutch;
 void IRAM_ATTR isr_rpm() {
   const uint32_t now = micros();
   portENTER_CRITICAL_ISR(&s_mux);
-  s_rpmLastEdgeUs = now;
   const uint32_t delta = now - s_rpmLastAcceptedUs;
   if (delta >= cfg::RPM_MIN_DELTA_US) {  // rejet EMI etage 1 : frequence impossible
-    s_rpmLastAcceptedUs = now;
+    s_rpmLastAcceptedUs = now;           // MAJ uniquement sur impulsion validee
     s_rpmLastDeltaUs    = delta;
     s_rpmEdgeSeq++;
   }
@@ -109,15 +110,16 @@ void resetDynamics() {
 }
 
 void updateRpm() {
-  uint32_t seq, delta, lastEdge;
+  uint32_t seq, delta, lastAcceptedUs;
   portENTER_CRITICAL(&s_mux);
-  seq      = s_rpmEdgeSeq;
-  delta    = s_rpmLastDeltaUs;
-  lastEdge = s_rpmLastEdgeUs;
+  seq            = s_rpmEdgeSeq;
+  delta          = s_rpmLastDeltaUs;
+  lastAcceptedUs = s_rpmLastAcceptedUs;
   portEXIT_CRITICAL(&s_mux);
 
-  // Moteur cale : aucune impulsion depuis RPM_STALL_US.
-  if (static_cast<uint32_t>(micros() - lastEdge) > cfg::RPM_STALL_US) {
+  // Moteur cale : aucune impulsion VALIDEE depuis RPM_STALL_US (les parasites EMI
+  // rejetes ne comptent pas -> une tempete EMI ne maintient pas le moteur "vivant").
+  if (static_cast<uint32_t>(micros() - lastAcceptedUs) > cfg::RPM_STALL_US) {
     if (s_rpmFiltered != 0 || s_rpmInstant != 0) {
       s_rpmFiltered = 0;
       s_rpmInstant  = 0;
@@ -132,18 +134,22 @@ void updateRpm() {
   if (seq == s_seenSeq || delta < cfg::RPM_MIN_DELTA_US) return;  // pas de nouvelle impulsion
   s_seenSeq = seq;
 
-  const int inst = static_cast<int>(60000000UL / delta);
-  if (inst > cfg::RPM_MAX_PLAUSIBLE) return;  // rejet EMI etage 2 : borne haute
+  int inst = static_cast<int>(60000000UL / delta);
+  if (inst > cfg::RPM_MAX_PLAUSIBLE) inst = cfg::RPM_MAX_PLAUSIBLE;  // borne dure
 
-  // rejet EMI etage 2 (suite) : on refuse une HAUSSE brutale hors slew physique.
-  // Une baisse (decel / impulsion manquee) est toujours acceptee.
-  if (s_rpmInstant != 0 && (inst - s_rpmInstant) > cfg::RPM_SLEW_MAX) return;
-
-  s_rpmInstant = inst;
-  if (s_rpmFiltered == 0)
+  if (s_rpmInstant == 0) {
+    s_rpmInstant  = inst;
     s_rpmFiltered = inst;
-  else
-    s_rpmFiltered += (inst - s_rpmFiltered) / (1 << cfg::RPM_FILTER_SHIFT);  // EWMA alpha=0.25
+  } else {
+    // Limitation de pente TEMPORELLE : la variation admise est proportionnelle a
+    // la duree ecoulee, pas fixe par impulsion. On CLAMPE (on ne rejette pas) ->
+    // un spike EMI est borne, et une impulsion manquee ne "latche" pas
+    // l'estimation a une valeur fausse.
+    const float dtSec   = delta / 1000000.0f;
+    const int   maxStep = static_cast<int>(cfg::RPM_SLEW_RPM_PER_S * dtSec) + 50;
+    s_rpmInstant = constrain(inst, s_rpmInstant - maxStep, s_rpmInstant + maxStep);
+    s_rpmFiltered += (s_rpmInstant - s_rpmFiltered) / (1 << cfg::RPM_FILTER_SHIFT);
+  }
 
   state::setRpmInstant(s_rpmInstant);
   state::setRpmFiltered(s_rpmFiltered);
