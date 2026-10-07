@@ -39,6 +39,12 @@ void     setLean(int rollDegX10, int lateralGx100, bool ok);
 void     getLean(int& rollDegX10, int& lateralGx100, bool& ok);
 uint32_t lastLeanMs();
 
+// ---- Temperature eau (tache DS18B20 ou sim ecrit ; Core 1 lit) ----
+//  tempCx10 : temperature en degres C * 10. ok : capteur present et plausible.
+void     setWaterTemp(int tempCx10, bool ok);
+void     getWaterTemp(int& tempCx10, bool& ok);
+uint32_t lastWaterTempMs();
+
 // ---- Heartbeat de loop() (surveille par le superviseur, Core 0) ----
 void     beatEngineLoop();
 uint32_t lastEngineBeatMs();

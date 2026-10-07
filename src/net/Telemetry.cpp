@@ -22,22 +22,25 @@ void sseTask(void*) {
     vTaskDelay(pdMS_TO_TICKS(cfg::SSE_PERIOD_MS));
 
     if (web::sseClients() > 0) {
-      int frontX10, rearX10, slipX10, slipRateX10, rollX10, latGx100;
-      bool imuOk;
+      int frontX10, rearX10, slipX10, slipRateX10, rollX10, latGx100, waterX10;
+      bool imuOk, waterOk;
       state::getSpeeds(frontX10, rearX10);
       state::getSlip(slipX10, slipRateX10);
       state::getLean(rollX10, latGx100, imuOk);
+      state::getWaterTemp(waterX10, waterOk);
 
       snprintf(buf, sizeof(buf),
         "{\"rpm\":%d,\"speed\":%.1f,\"slip\":%.1f,\"mode\":\"%s\",\"tier\":\"%s\","
-        "\"lean\":%.1f,\"imu\":%s}",
+        "\"lean\":%.1f,\"imu\":%s,\"waterTemp\":%.1f,\"waterOk\":%s}",
         state::getRpmFiltered(),
         frontX10 / 10.0f,
         slipX10 / 10.0f,
         toString(state::getMode()),
         toString(license::tier()),
         rollX10 / 10.0f,
-        imuOk ? "true" : "false");
+        imuOk ? "true" : "false",
+        waterX10 / 10.0f,
+        waterOk ? "true" : "false");
 
       web::sseSend(buf, "telemetry");
     }

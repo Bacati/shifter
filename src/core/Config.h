@@ -18,6 +18,8 @@ namespace pins {
   constexpr int PIT_BTN     = 33;
   constexpr int IMU_SDA     = 21;  // MPU6050 (I2C) - angle de roulis, garde-fou anti-angle
   constexpr int IMU_SCL     = 22;
+  constexpr int WATER_TEMP  = 32;  // DS18B20 (1-Wire) - temperature eau/liquide refroidissement
+                                    // /!\ resistance de tirage 4,7k vers 3V3 OBLIGATOIRE sur le bus
 }
 
 // Les macros GPIO.out_w1ts / w1tc n'adressent que les GPIO 0..31.
@@ -94,6 +96,16 @@ namespace cfg {
   #ifndef IMU_REQUIRED
     #define IMU_REQUIRED 1
   #endif
+
+  // ---- Temperature eau (DS18B20, 1-Wire) ---------------------
+  //  Purement informatif pour l'instant (dashboard / logs) : n'influence
+  //  aucune assistance. Tache dediee Core 0, lecture non bloquante pour loop().
+  constexpr uint32_t WATER_TEMP_PERIOD_MS = 1000;  // cycle conversion+lecture (12 bits ~750 ms)
+  constexpr float    WATER_TEMP_MIN_C     = -20.0f; // plausibilite capteur
+  constexpr float    WATER_TEMP_MAX_C     = 150.0f;
+  constexpr float    WATER_TEMP_WARN_C    = 95.0f;  // seuil d'alerte (affichage ; pas de coupure)
+  constexpr uint32_t WATER_TEMP_STALE_MS  = 3000;   // au-dela : capteur considere en panne
+  constexpr uint32_t WATER_TEMP_PROBE_MS  = 2000;   // re-essai de detection si capteur absent
 
   // ---- Capteurs de roue / entrees -------------------------
   constexpr uint32_t WHEEL_MIN_PULSE_US   = 0;    // 0 = pas d'anti-rebond (VR/Hall). >0 pour reed.

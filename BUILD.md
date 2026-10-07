@@ -29,6 +29,7 @@ src/
 | `core/SharedState.*` | Frontière de données Core 0 ↔ Core 1 (atomics + spinlock) |
 | `sensors/Sensors.*` | ISR, filtre RPM/EMI, vitesses roues **(mesure de période)**, glisse, anti-rebonds |
 | `sensors/Imu.*` | MPU6050 (I²C) → angle de roulis → garde-fou anti-angle du slip control |
+| `sensors/WaterTemp.*` | DS18B20 (1-Wire) → température eau, informatif (dashboard + logs) |
 | `actuator/IgnitionCut.*` | Broche de coupure + application de la priorité stricte |
 | `control/Arbiter.*` | Arbitre central des assistances + `leanAuthority()` (anti-angle) |
 | `persistence/Storage.*` | NVS (mutex) + `sanitize()` (clamp unique) |
@@ -48,7 +49,8 @@ src/
 - **Cœur** : Arduino-ESP32 **2.0.x** (ESP-IDF 4.4). La signature
   `esp_task_wdt_init(uint32_t, bool)` utilisée ici est celle de l'IDF 4.
 - **Bibliothèques** :
-  - PlatformIO : `ESP32Async/AsyncTCP` + `ESP32Async/ESPAsyncWebServer` (voir `platformio.ini`).
+  - PlatformIO : `ESP32Async/AsyncTCP`, `ESP32Async/ESPAsyncWebServer`,
+    `paulstoffregen/OneWire`, `milesburton/DallasTemperature` (voir `platformio.ini`).
   - Arduino IDE : installer *AsyncTCP* et *ESPAsyncWebServer* (forks maintenus
     « ESP32Async ») dans `~/Documents/Arduino/libraries/`.
 - `mbedtls` : fourni par le cœur ESP32 (aucune install).
@@ -126,6 +128,7 @@ L'environnement `esp32dev` (vraie carte) garde le WiFi complet.
 | Bouton pit | 33 | Actif à l'état bas. |
 | IMU MPU6050 — SDA | 21 | I²C, adresse 0x68 (AD0 à la masse). Pull-ups 4,7 kΩ vers 3V3. |
 | IMU MPU6050 — SCL | 22 | Monter le capteur solidaire du châssis. Ajuster le mapping d'axes dans `cfg::IMU_ACC_ROLL_*` / `IMU_GYRO_ROLL_AXIS` / `IMU_ROLL_SIGN`. |
+| Température eau (DS18B20) | 32 | 1-Wire. **Résistance de tirage 4,7 kΩ vers 3V3 obligatoire** sur le bus de données. Sonde étanche dans la durite / culasse. Purement informatif (dashboard + logs), n'actionne aucune coupure. |
 
 Toutes les entrées TOR sont en `INPUT_PULLUP`. Un fil coupé → état « relâché »
 (fail-safe). Les macros `GPIO.out_w1ts/w1tc` n'adressent que GPIO 0–31

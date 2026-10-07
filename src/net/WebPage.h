@@ -20,6 +20,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   .card{background:#1e1e1e;border:1px solid #333;padding:16px;border-radius:10px;max-width:420px;margin:0 auto 16px;text-align:left}
   .row{display:flex;justify-content:space-between;border-top:1px solid #333;margin-top:10px;padding-top:10px;text-align:center}
   .v{font-size:24px;font-weight:bold;color:#0fc}
+  .v.warn{color:#e74c3c}
   .badge{display:inline-block;background:#555;padding:5px 12px;border-radius:20px;font-weight:bold;font-size:13px}
   .badge.mPITLIMIT,.badge.mLAUNCH{background:#e74c3c}
   .badge.mSHIFTING{background:#3498db}
@@ -46,8 +47,10 @@ static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
     <div><small>Vitesse</small><div class="v" id="spd">0</div><small>km/h</small></div>
     <div><small>Slip</small><div class="v" id="slip">0</div><small>%</small></div>
     <div><small>Roulis</small><div class="v" id="lean">0</div><small>&deg;</small></div>
+    <div><small>Eau</small><div class="v" id="waterTemp">&mdash;</div><small>&deg;C</small></div>
   </div>
   <p class="hint" id="imuState">IMU : &mdash;</p>
+  <p class="hint" id="waterState">Capteur eau : &mdash;</p>
 </div>
 
 <div class="card">
@@ -185,6 +188,16 @@ static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
         $('slip').textContent=(+d.slip).toFixed(1);
         if(d.lean!=null) $('lean').textContent=(+d.lean).toFixed(0);
         if(d.imu!=null) $('imuState').textContent='IMU : '+(d.imu?'OK':'ABSENT / MUET (slip control desactive)');
+        if(d.waterOk){
+          var wt=+d.waterTemp;
+          $('waterTemp').textContent=wt.toFixed(1);
+          $('waterTemp').className='v'+(wt>=95?' warn':'');  // garder en phase avec cfg::WATER_TEMP_WARN_C
+          $('waterState').textContent='Capteur eau : OK';
+        } else {
+          $('waterTemp').textContent='--';
+          $('waterTemp').className='v';
+          $('waterState').textContent='Capteur eau : absent / non lu';
+        }
         $('tier').textContent='Licence: '+d.tier;
         var m=$('mode');
         m.textContent=d.mode;

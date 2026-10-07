@@ -19,6 +19,10 @@ std::atomic<int>      s_rollX10{0};
 std::atomic<int>      s_latGx100{100};
 std::atomic<int>      s_imuOk{0};
 std::atomic<uint32_t> s_leanMs{0};
+
+std::atomic<int>      s_waterTempX10{0};
+std::atomic<int>      s_waterTempOk{0};
+std::atomic<uint32_t> s_waterTempMs{0};
 }  // namespace
 
 void state::begin() {
@@ -64,6 +68,17 @@ void state::getLean(int& rollX10, int& latGx100, bool& ok) {
   ok       = s_imuOk.load() != 0;
 }
 uint32_t state::lastLeanMs() { return s_leanMs.load(); }
+
+void state::setWaterTemp(int tempX10, bool ok) {
+  s_waterTempX10.store(tempX10);
+  s_waterTempOk.store(ok ? 1 : 0);
+  s_waterTempMs.store(millis());
+}
+void state::getWaterTemp(int& tempX10, bool& ok) {
+  tempX10 = s_waterTempX10.load();
+  ok      = s_waterTempOk.load() != 0;
+}
+uint32_t state::lastWaterTempMs() { return s_waterTempMs.load(); }
 
 void     state::beatEngineLoop()  { s_engineBeat.store(millis()); }
 uint32_t state::lastEngineBeatMs() { return s_engineBeat.load(); }

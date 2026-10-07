@@ -65,9 +65,13 @@ dans `src/persistence/secrets.h` (gitignoré). Génération / provisioning : voi
 - **Dual-core** : Core 1 = sanctuaire calcul moteur (`loop()`), Core 0 = WiFi,
   télémétrie, IMU, superviseur.
 - **Double watchdog** : WDT matériel sur `loop()` (3 s) **+** superviseur (Core 0)
-  qui, si `loop()` se fige > 1 s, force la coupure OFF (allumage rendu) et
+  qui, si `loop()` se fige > 400 ms, force la coupure OFF (allumage rendu) et
   redémarre.
 - Synchro ISR ↔ tâches par spinlock ; scalaires partagés en `std::atomic`.
+- **Température eau** (DS18B20, 1-Wire) : informatif pour l'instant (dashboard +
+  logs), n'actionne aucune coupure. Capteur digital (trame + CRC) plutôt
+  qu'une thermistance analogique, pour la même raison que le filtre EMI RPM :
+  moins sensible au bruit du harnais près du PVL.
 
 ### 1.4 Garde-fou anti-angle (IMU MPU6050)
 
@@ -89,7 +93,7 @@ N'affecte **que** le slip control (launch = à l'arrêt moto droite ; overrev / 
 
 L'ESP32 génère son propre AP WiFi **WPA2 avec mot de passe unique par appareil**
 (généré au 1er boot, imprimé sur le port série). Page web embarquée :
-- **Télémétrie live** (SSE) : RPM, vitesses, glisse, roulis, état IMU, mode arbitre, licence.
+- **Télémétrie live** (SSE) : RPM, vitesses, glisse, roulis, état IMU, température eau, mode arbitre, licence.
 - **Cartographie** : temps de coupure, régimes limites, circonférence pneu,
   tolérance de glisse — clampés, sauvegardés en NVRAM.
 - **Licence** : saisie de clé d'upgrade.
@@ -164,6 +168,7 @@ Ne pas sauter d'étape. À chaque phase : moteur coupé sauf mention contraire.
 - 3 boutons poussoirs (shifter D26, embrayage D25, pit D33) vers GND.
 - **Résistance de pull-down 10 kΩ sur D4 (CUT)** + LED/résistance ou oscilloscope sur D4.
 - MPU6050 sur I²C (D21/D22) + pull-ups 4,7 kΩ.
+- DS18B20 sur 1-Wire (D32) + pull-up 4,7 kΩ vers 3V3 (verre d'eau tiède pour le test).
 - Multimètre / oscilloscope.
 
 ### 4.1 Boot & sécurité de base
@@ -175,6 +180,8 @@ Ne pas sauter d'étape. À chaque phase : moteur coupé sauf mention contraire.
    `00:00:00:00:00:00`.**
 3. `[IMU] MPU6050 OK` (ou `absent` → alors le slip control sera désactivé, c'est
    le comportement attendu).
+3bis. `[TEMP] DS18B20 OK` (ou `absent` → la télémétrie affichera « capteur
+   absent » ; sans impact sur les assistances, c'est informatif).
 4. **WiFi** : rejoindre `AptatioECU-XXXXXX` avec le mot de passe imprimé. Ouvrir
    `http://192.168.4.1` → la page s'affiche.
 5. **Auth** : `POST /api/config` refusé sans jeton. Login avec le PIN. Modifier
@@ -204,6 +211,10 @@ Ne pas sauter d'étape. À chaque phase : moteur coupé sauf mention contraire.
 10. **IMU** : incliner le MPU6050 → `lean` télémétré suit. Au-delà de 28° (avec
     conditions de glisse injectées) → les coupures slip s'arrêtent. Débrancher
     l'IMU → `imu:false` → slip désactivé.
+11. **Température eau** : tremper la sonde dans l'eau tiède puis froide →
+    `waterTemp` télémétré suit (rafraîchi ~1 s, DS18B20 12 bits). Débrancher la
+    sonde → `waterOk:false` affiché, aucune assistance affectée (purement
+    informatif à ce stade).
 
 ### 4.3 Assistances complètes (licence PRO, signaux injectés)
 

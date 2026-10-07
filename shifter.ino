@@ -30,6 +30,7 @@
 #include "src/actuator/IgnitionCut.h"
 #include "src/sensors/Sensors.h"
 #include "src/sensors/Imu.h"
+#include "src/sensors/WaterTemp.h"
 #include "src/persistence/License.h"
 #include "src/net/Network.h"
 #include "src/net/WebServer.h"
@@ -70,6 +71,9 @@ void setup() {
 #ifndef WOKWI_SIM
   imu::begin();       // MPU6050 : angle de roulis (garde-fou anti-angle du slip control)
   imu::startTask();
+
+  watertemp::begin(); // DS18B20 : temperature eau (informatif : dashboard + logs)
+  watertemp::startTask();
 
   net::begin();       // WiFi AP AVANT license (WiFi.macAddress() requis)
   Serial.printf("[BOOT] HWID: %s\n", net::hwid().c_str());  // MAC lisible pour le QC / provisioning

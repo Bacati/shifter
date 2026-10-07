@@ -18,6 +18,8 @@ uint32_t s_hangUntil = 0;          // blocage volontaire de loop() (test supervi
 int      s_leanX10   = 0;          // angle de roulis simule x10 (garde-fou anti-angle)
 int      s_latGx100  = 100;        // |accel|/g x100 simule
 bool     s_imuOk     = true;       // IMU simule present/fiable
+int      s_waterTempX10 = 650;     // temperature eau simulee x10 (65.0 C par defaut)
+bool     s_waterOk      = true;    // capteur eau simule present/fiable
 String   s_line;
 
 void printHelp() {
@@ -34,6 +36,8 @@ void printHelp() {
   Serial.println("  lean <deg>  angle de roulis simule (garde-fou : slip coupe > 28 deg)");
   Serial.println("  latg <x100> |accel|/g x100 simule (>130 -> blocage dur du slip)");
   Serial.println("  imu <0|1>   1 = IMU present ; 0 = IMU muet (fail-safe : slip desactive)");
+  Serial.println("  temp <c>    temperature eau simulee en degres C");
+  Serial.println("  watersensor <0|1>  1 = capteur eau present ; 0 = capteur eau absent");
   Serial.println("  hang <s>    bloque loop() <s> secondes -> le superviseur doit rebooter la carte");
   Serial.println("  keys        affiche les 3 cles de licence attendues pour cette carte");
   Serial.println("  key <cle>   teste un deblocage de licence (change le tier a chaud)");
@@ -52,6 +56,8 @@ void printShow() {
                 c.pitRpm, c.launchRpm, c.maxSlipPercent);
   Serial.printf("[SIM] roulis=%.1f deg  latG=%.2f  IMU=%s\n",
                 s_leanX10 / 10.0f, s_latGx100 / 100.0f, s_imuOk ? "OK" : "MUET");
+  Serial.printf("[SIM] eau=%.1f C  capteur=%s\n",
+                s_waterTempX10 / 10.0f, s_waterOk ? "OK" : "ABSENT");
 }
 
 void handleLine(String line) {
@@ -77,6 +83,8 @@ void handleLine(String line) {
   else if (cmd == "lean")   { s_leanX10 = constrain((int)val, -90, 90) * 10;        printShow(); }
   else if (cmd == "latg")   { s_latGx100 = constrain((int)val, 0, 400);             printShow(); }
   else if (cmd == "imu")    { s_imuOk = (val != 0);                                 printShow(); }
+  else if (cmd == "temp")   { s_waterTempX10 = constrain((int)val, -20, 150) * 10;  printShow(); }
+  else if (cmd == "watersensor") { s_waterOk = (val != 0);                         printShow(); }
   else if (cmd == "hang")   {
     const int s = constrain((int)val, 1, 10);
     Serial.printf("[SIM] blocage de loop() pendant %d s : le superviseur doit rebooter (6 blinks)\n", s);
@@ -178,6 +186,9 @@ void sim::update() {
 
   // IMU simule (pas de MPU6050 en simu) : entretient l'etat "frais".
   state::setLean(s_leanX10, s_latGx100, s_imuOk);
+
+  // Capteur eau simule (pas de DS18B20 en simu).
+  state::setWaterTemp(s_waterTempX10, s_waterOk);
 }
 
 #else
