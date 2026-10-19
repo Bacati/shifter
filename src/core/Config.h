@@ -20,11 +20,31 @@ namespace pins {
   constexpr int IMU_SCL     = 22;
   constexpr int WATER_TEMP  = 32;  // DS18B20 (1-Wire) - temperature eau/liquide refroidissement
                                     // /!\ resistance de tirage 4,7k vers 3V3 OBLIGATOIRE sur le bus
+  // Bus CAN (controleur TWAI integre + transceiver externe 3,3 V). RESERVEES, pas encore
+  // utilisees : proposition a valider avec le bureau d'etude (voir AUDIT.md §CAN).
+  // Evite : strapping (0,2,5,12,15), PSRAM WROVER (16,17), entrees seules (34..39).
+  constexpr int CAN_TX      = 18;
+  constexpr int CAN_RX      = 19;
 }
 
 // Les macros GPIO.out_w1ts / w1tc n'adressent que les GPIO 0..31.
 static_assert(pins::CUT >= 0 && pins::CUT < 32,
               "pins::CUT doit etre < 32 (registre GPIO.out_w1ts/w1tc)");
+
+// Carte mere commune : deux fonctions ne doivent JAMAIS partager une broche.
+namespace pins_check {
+  constexpr int kAll[] = { pins::CUT, pins::RPM, pins::WHEEL_FRONT, pins::WHEEL_REAR,
+                           pins::SHIFTER, pins::CLUTCH_HALL, pins::PIT_BTN, pins::IMU_SDA,
+                           pins::IMU_SCL, pins::WATER_TEMP, pins::CAN_TX, pins::CAN_RX };
+  constexpr int kCount = sizeof(kAll) / sizeof(kAll[0]);
+  constexpr bool allDistinct(int i, int j) {   // C++11 : recursion, pas de boucle
+    return i >= kCount ? true
+         : j >= kCount ? allDistinct(i + 1, i + 2)
+         : (kAll[i] != kAll[j]) && allDistinct(i, j + 1);
+  }
+}
+static_assert(pins_check::allDistinct(0, 1), "deux fonctions utilisent la meme broche (pins::*)");
+static_assert(pins::CAN_TX < 34, "CAN_TX doit etre une broche de sortie (GPIO34..39 = entrees seules)");
 
 namespace cfg {
   // ---- RPM / filtre EMI --------------------------------------------------
@@ -34,6 +54,17 @@ namespace cfg {
   constexpr float    RPM_SLEW_RPM_PER_S = 120000.0f; // pente max admise (tr/min/s) : clamp, pas rejet
   constexpr uint32_t RPM_STALL_US       = 500000;  // sans impulsion VALIDEE => moteur cale
   constexpr int      RPM_FILTER_SHIFT   = 2;       // EWMA : alpha = 1 / 2^shift = 0.25
+  // Verrouillage : depuis l'arret, le RPM n'est publie qu'apres RPM_LOCK_CONSISTENT periodes
+  // successives COHERENTES (+/- RPM_LOCK_TOL_PCT) ET compatibles avec un moteur reel (<= OVERREV).
+  // Un parasite aleatoire ne fabrique donc plus de "moteur fantome".
+  constexpr int      RPM_LOCK_CONSISTENT = 5;
+  constexpr int      RPM_LOCK_TOL_PCT    = 30;
+  // Deverrouillage : RPM_UNLOCK_BAD periodes consecutives hors de [1/RPM_BAD_LO .. RPM_BAD_HI] x
+  // la periode attendue = signal qui n'est plus un moteur (arret + bruit). Une impulsion
+  // manquee isolee (x2) ne deverrouille pas.
+  constexpr int      RPM_UNLOCK_BAD      = 6;
+  constexpr float    RPM_BAD_LO          = 0.5f;
+  constexpr float    RPM_BAD_HI          = 1.6f;
 
   // ---- Overrev limiter -------------------------------------------------
   constexpr uint16_t OVERREV_CUT_MS     = 50;
@@ -42,11 +73,20 @@ namespace cfg {
   // ---- Pit limiter ---------------------------------------------------
   constexpr uint16_t PIT_CUT_MS         = 20;
   constexpr uint32_t PIT_PERIOD_MS      = 50;
+  constexpr int      PIT_HARD_BAND_RPM  = 400;     // repli regime : au-dela de pitRpm + bande, coupure continue
+  constexpr float    PIT_HARD_BAND_KMH  = 3.0f;    // au-dela de pitKmh + bande : coupure continue (vrai limiteur)
+  constexpr float    PIT_SPEED_VALID_KMH = 1.0f;   // sous cette vitesse (les 2 roues) la mesure est jugee absente
+                                                   // -> repli sur le regime
+
+  // ---- Garde-fou ultime sur toute coupure (defense en profondeur) -------
+  constexpr uint16_t CUT_ABS_MAX_MS     = 200;     // aucune coupure unique ne depasse cette duree
 
   // ---- Quickshifter ------------------------------------------------
   constexpr uint32_t SHIFT_WINDOW_US       = 25000; // fenetre d'analyse de l'appui
   constexpr uint32_t SHIFT_ISR_DEBOUNCE_US = 30000; // anti-rebond materiel (ISR)
   constexpr uint32_t SHIFT_LOCKOUT_MS      = 250;   // verrou anti double-coupure
+  constexpr uint32_t SHIFT_CONFIRM_US      = 2000;  // la broche doit etre ENCORE basse apres ce delai : rejette
+                                                    // les parasites EMI de quelques us/ms (latence +2 ms)
 
   // ---- Launch control -------------------------------------------
   constexpr float    LAUNCH_SPEED_MAX_KMH = 5.0f;  // au-dela : on passe en roulage
@@ -54,6 +94,7 @@ namespace cfg {
   constexpr uint16_t LAUNCH_CUT_MIN_MS    = 5;
   constexpr uint16_t LAUNCH_CUT_MAX_MS    = 20;
   constexpr uint32_t LAUNCH_PERIOD_MS     = 50;
+  constexpr int      LAUNCH_HARD_BAND_RPM = 300;   // au-dela de launchRpm + bande : coupure continue (2-step)
 
   // ---- Slip control (motricite ligne droite) -----------------
   constexpr float    SLIP_MIN_SPEED_KMH     = 5.0f;
@@ -91,6 +132,33 @@ namespace cfg {
   constexpr int      IMU_ACC_ROLL_DEN   = 2;
   constexpr int      IMU_GYRO_ROLL_AXIS = 0;
   constexpr float    IMU_ROLL_SIGN      = 1.0f;
+  // Recalage accelero INTERDIT des que la moto tourne (lacet > seuil) : en virage stabilise
+  // l'accelero "voit a plat" et ramenerait l'angle estime vers 0 alors que la moto est couchee
+  // (mesure : |acc| reste dans la plage de confiance jusqu'a ~26 deg de roulis).
+  constexpr int      IMU_GYRO_YAW_AXIS     = 2;      // axe vertical de la moto (Z)
+  constexpr float    IMU_RECAL_MAX_YAW_DPS = 3.0f;
+  // L'angle n'est declare fiable (ok=true) qu'apres un recalage moto quasi droite : apres un
+  // (re)demarrage de l'IMU ou de l'ECU l'angle initial (0) est une hypothese, pas une mesure.
+  constexpr float    IMU_VALID_MAX_DEG     = 5.0f;
+  // ... et CONVERGEE : angle accelero ET angle estime tous deux sous IMU_VALID_MAX_DEG, de facon
+  // soutenue (score +1 par echantillon bon, -1 si l'information manque, -2 si l'estimation n'a pas converge ; valide a IMU_VALID_SCORE).
+  // Sans cela, apres une re-init en virage l'estimation vaut -angle (le gyro integre la remise a
+  // plat depuis 0) et serait declaree fiable des le 1er echantillon "moto droite".
+  constexpr int      IMU_VALID_SCORE       = 100;
+  // Detection d'un MPU6050 endormi / fige apres brownout : |accel| ~ 0 ou trames identiques.
+  constexpr float    IMU_ACC_SANE_LO_G     = 0.5f;
+  constexpr uint8_t  IMU_FROZEN_SAMPLES    = 10;     // 10 x 5 ms = 50 ms de trames brutes identiques
+  constexpr uint32_t IMU_REINIT_MS         = 500;    // periode des tentatives de (re)init
+  // Biais du gyro (zero-rate jusqu'a +/-20 deg/s sur un MPU6050 !) : mesure valable uniquement si le
+  // signal est CALME (crete-a-crete <= IMU_BIAS_QUIET_DPS). Mesure en roulant (re-init de l'IMU en
+  // course) = moyenne du mouvement reel, pas un biais -> rejetee. Tant qu'aucun biais valide n'a
+  // ete mesure, l'angle est declare non fiable (slip coupe).
+  //  La mesure n'est faite QUE roues arretees (vitesses avant ET arriere < IMU_BIAS_STOP_KMH) : un
+  //  signal constant en roulant (entree en virage lente a 3 deg/s) est indiscernable d'un biais.
+  constexpr float    IMU_BIAS_QUIET_DPS    = 2.5f;   // ecart-type maximal du gyro de roulis sur la fenetre
+  constexpr float    IMU_BIAS_STOP_KMH     = 1.0f;
+  constexpr int      IMU_BIAS_WINDOW_SAMPLES = 200;  // 1 s a 200 Hz : fenetre de re-mesure en continu
+  constexpr float    IMU_BIAS_MAX_STEP_DPS = 3.0f;   // une fois valide, saut maximal accepte par re-mesure
   // 1 = IMU obligatoire : pas d'IMU fiable -> slip control DESACTIVE (securite).
   // 0 = tolere l'absence d'IMU (banc / cartes sans capteur) -> slip sans garde-fou.
   #ifndef IMU_REQUIRED
@@ -106,28 +174,42 @@ namespace cfg {
   constexpr float    WATER_TEMP_WARN_C    = 95.0f;  // seuil d'alerte (affichage ; pas de coupure)
   constexpr uint32_t WATER_TEMP_STALE_MS  = 3000;   // au-dela : capteur considere en panne
   constexpr uint32_t WATER_TEMP_PROBE_MS  = 2000;   // re-essai de detection si capteur absent
+  constexpr uint8_t  WATER_TEMP_MAX_FAILS = 3;      // lectures ratees consecutives tolerees avant "absent"
+  constexpr float    WATER_TEMP_POR_C     = 85.0f;  // valeur d'usine du DS18B20 (conversion non faite)
 
   // ---- Capteurs de roue / entrees -------------------------
   constexpr uint32_t WHEEL_MIN_PULSE_US   = 0;    // 0 = pas d'anti-rebond (VR/Hall). >0 pour reed.
   constexpr uint32_t SPEED_CALC_MS        = 40;   // periode de calcul vitesse / glisse
+  // Roue avant "vivante" pour calculer une glisse : derniere impulsion il y a moins de
+  // max(SLIP_FRONT_FRESH_MIN_US, SLIP_FRONT_FRESH_PERIODS x periode mesuree). Un capteur avant
+  // debranche fait sinon decroitre la vitesse avant estimee et fabrique une fausse glisse.
+  // Une glisse n'est retenue que si elle est vue sur SLIP_CONFIRM_WINDOWS fenetres consecutives de
+  // SPEED_CALC_MS : une impulsion parasite au milieu d'une periode fausse DEUX intervalles de suite.
+  constexpr int      SLIP_CONFIRM_WINDOWS      = 4;
+  constexpr uint32_t SLIP_FRONT_FRESH_MIN_US   = 60000;
+  constexpr float    SLIP_FRONT_FRESH_PERIODS  = 1.5f;
   constexpr float    WHEEL_SPEED_MAX_KMH  = 160.0f; // vitesse impossible pour un 50cc -> rejet glitch
   constexpr float    WHEEL_SPEED_SLEW_KMH = 25.0f;  // variation max plausible entre 2 fenetres
-  constexpr uint32_t WHEEL_STOP_US        = 400000; // sans impulsion depuis -> roue arretee
+  constexpr uint32_t WHEEL_STOP_US        = 400000; // sans impulsion depuis -> roue arretee (plancher)
+  constexpr float    WHEEL_STOP_KMH       = 2.0f;   // la roue est "arretee" sous cette vitesse : le delai
+                                                    // d'arret s'allonge si peu d'impulsions/tour (voir Sensors.cpp)
+  constexpr uint32_t WHEEL_STOP_MAX_US    = 3000000;
   constexpr uint32_t INPUT_DEBOUNCE_MS    = 15;   // anti-rebond bouton pit / contacteur embrayage
 
   // ---- Bornes de validation NVS (partagees web + chargement) --------
   constexpr int SHIFT_CUT_MIN = 10,   SHIFT_CUT_MAX = 150;
   constexpr int MIN_RPM_MIN   = 2000, MIN_RPM_MAX   = 15000;
   constexpr int LAUNCH_MIN    = 2000, LAUNCH_MAX    = 15000;
-  constexpr int SLIP_MIN      = 0,    SLIP_MAX      = 50;
+  constexpr int SLIP_MIN      = 5,    SLIP_MAX      = 50;   // > SLIP_HYSTERESIS_PCT (sinon jamais de desarmement)
   constexpr int WHEEL_MIN     = 1000, WHEEL_MAX     = 2500;
   constexpr int PULSES_MIN    = 1,    PULSES_MAX    = 20;
   constexpr int PIT_MIN       = 2000, PIT_MAX       = 10000;
+  constexpr int PITKMH_MIN    = 10,   PITKMH_MAX    = 100;
 
   // ---- Cartographie par defaut ---------------------------------------
   // Ordre = declaration de EcuConfig :
-  // shiftCutMs, minShiftRpm, launchRpm, maxSlipPercent, wheelCircumMm, pulsesPerRev, pitRpm
-  constexpr EcuConfig DEFAULTS = { 50, 6000, 8000, 15, 1800, 3, 4000 };
+  // shiftCutMs, minShiftRpm, launchRpm, maxSlipPercent, wheelCircumMm, pulsesPerRev, pitRpm, pitKmh
+  constexpr EcuConfig DEFAULTS = { 50, 6000, 8000, 15, 1800, 3, 4000, 60 };
 
   // ---- RTOS -----------------------------------------------------------
   constexpr int      WDT_TIMEOUT_S        = 3;

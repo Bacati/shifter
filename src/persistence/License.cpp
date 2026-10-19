@@ -112,6 +112,12 @@ bool license::tryUnlock(const String& keyIn, uint32_t& retryAfterMs) {
   for (int t = kLicenseTierCount - 1; t >= 0; --t) {
     if (matchesTier(key, static_cast<LicenseTier>(t))) {
       s_fails = 0;
+      // Jamais de baisse de niveau par saisie de cle : re-saisir une ancienne cle TRACK sur une
+      // carte PRO ne doit pas faire perdre le PRO. (Retour en arriere : WIPE usine.)
+      if (t < s_tier.load()) {
+        Serial.printf("[LIC] cle tier %d valide mais niveau actuel %d conserve\n", t, static_cast<int>(s_tier.load()));
+        return true;
+      }
       s_tier.store(static_cast<uint8_t>(t));
       storage::saveLicense(key, static_cast<LicenseTier>(t));
       Serial.printf("[LIC] deblocage -> tier %d\n", t);

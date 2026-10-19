@@ -6,6 +6,7 @@
 #include "../persistence/Storage.h"
 #include "../persistence/License.h"
 #include "Network.h"
+#include "ParamParse.h"
 #include "WebPage.h"
 #include "../sim/SimEngine.h"
 #include <WiFi.h>
@@ -74,9 +75,21 @@ bool engineRunning() {
   return state::getRpmFiltered() != 0 || state::getRpmInstant() != 0;
 }
 
-int paramInt(AsyncWebServerRequest* r, const char* name, int fallback) {
-  if (r->hasParam(name, true)) return r->getParam(name, true)->value().toInt();
-  return fallback;
+// Parametre entier STRICT : absent -> true (valeur inchangee) ; present -> doit etre un entier
+// decimal dans [lo, hi], sinon false. (Avant : "" ou "abc" devenait 0 puis etait clampe au
+// minimum en silence -> un champ vide ecrasait la carto par ses valeurs mini.)
+bool paramIntStrict(AsyncWebServerRequest* r, const char* name, int lo, int hi, int& out) {
+  if (!r->hasParam(name, true)) return true;
+  return parseIntStrict(r->getParam(name, true)->value(), lo, hi, out);
+}
+
+// Les ecritures NVS (config, licence, mot de passe) desactivent le cache flash : loop() (Core 1)
+// est fige pendant l'ecriture, donc ignition::service() ne peut plus relacher une coupure en
+// cours. Interdit moteur en marche, comme l'OTA.
+bool refuseIfRunning(AsyncWebServerRequest* r) {
+  if (!engineRunning()) return false;
+  r->send(409, "text/plain", "moteur en marche : arretez le moteur");
+  return true;
 }
 
 // -------------------------------------------------------------------- routes
@@ -94,16 +107,16 @@ void handleState(AsyncWebServerRequest* r) {
   const EcuConfig   c = state::getConfig();
   const LicenseTier t = license::tier();
 
-  char b[512];
+  char b[640];
   snprintf(b, sizeof(b),
     "{\"fw\":\"%s\",\"ssid\":\"%s\",\"hwid\":\"%s\",\"tier\":%d,\"tierName\":\"%s\","
     "\"trackUnlocked\":%s,\"proUnlocked\":%s,"
-    "\"shiftCutMs\":%d,\"minShiftRpm\":%d,\"pitRpm\":%d,\"launchRpm\":%d,"
+    "\"shiftCutMs\":%d,\"minShiftRpm\":%d,\"pitRpm\":%d,\"pitKmh\":%d,\"launchRpm\":%d,"
     "\"maxSlipPercent\":%d,\"wheelCircumMm\":%d,\"pulsesPerRev\":%d}",
     FW_VERSION, net::ssid().c_str(), net::hwid().c_str(), static_cast<int>(t), toString(t),
     (t >= LicenseTier::Track) ? "true" : "false",
     (t >= LicenseTier::Pro)   ? "true" : "false",
-    c.shiftCutMs, c.minShiftRpm, c.pitRpm, c.launchRpm,
+    c.shiftCutMs, c.minShiftRpm, c.pitRpm, c.pitKmh, c.launchRpm,
     c.maxSlipPercent, c.wheelCircumMm, c.pulsesPerRev);
 
   AsyncWebServerResponse* res = r->beginResponse(200, "application/json", b);
@@ -147,6 +160,7 @@ void handleLogin(AsyncWebServerRequest* r) {
 
 void handleConfig(AsyncWebServerRequest* r) {
   if (!authValid(r)) { r->send(401, "text/plain", "auth requise"); return; }
+  if (refuseIfRunning(r)) return;
 
   const LicenseTier t = license::tier();
   if (r->hasParam("launchRpm", true) && t < LicenseTier::Track) {
@@ -159,13 +173,18 @@ void handleConfig(AsyncWebServerRequest* r) {
   }
 
   EcuConfig c = state::getConfig();
-  c.shiftCutMs    = paramInt(r, "shiftCutMs",    c.shiftCutMs);
-  c.minShiftRpm   = paramInt(r, "minShiftRpm",   c.minShiftRpm);
-  c.pitRpm        = paramInt(r, "pitRpm",        c.pitRpm);
-  c.wheelCircumMm = paramInt(r, "wheelCircumMm", c.wheelCircumMm);
-  c.pulsesPerRev  = paramInt(r, "pulsesPerRev",  c.pulsesPerRev);
-  if (t >= LicenseTier::Track) c.launchRpm      = paramInt(r, "launchRpm",      c.launchRpm);
-  if (t >= LicenseTier::Pro)   c.maxSlipPercent = paramInt(r, "maxSlipPercent", c.maxSlipPercent);
+  bool ok = true;
+  ok &= paramIntStrict(r, "shiftCutMs",    cfg::SHIFT_CUT_MIN, cfg::SHIFT_CUT_MAX, c.shiftCutMs);
+  ok &= paramIntStrict(r, "minShiftRpm",   cfg::MIN_RPM_MIN,   cfg::MIN_RPM_MAX,   c.minShiftRpm);
+  ok &= paramIntStrict(r, "pitRpm",        cfg::PIT_MIN,       cfg::PIT_MAX,       c.pitRpm);
+  ok &= paramIntStrict(r, "pitKmh",        cfg::PITKMH_MIN,    cfg::PITKMH_MAX,    c.pitKmh);
+  ok &= paramIntStrict(r, "wheelCircumMm", cfg::WHEEL_MIN,     cfg::WHEEL_MAX,     c.wheelCircumMm);
+  ok &= paramIntStrict(r, "pulsesPerRev",  cfg::PULSES_MIN,    cfg::PULSES_MAX,    c.pulsesPerRev);
+  if (t >= LicenseTier::Track)
+    ok &= paramIntStrict(r, "launchRpm",      cfg::LAUNCH_MIN, cfg::LAUNCH_MAX, c.launchRpm);
+  if (t >= LicenseTier::Pro)
+    ok &= paramIntStrict(r, "maxSlipPercent", cfg::SLIP_MIN,   cfg::SLIP_MAX,   c.maxSlipPercent);
+  if (!ok) { r->send(400, "text/plain", "valeur invalide ou hors bornes : rien n'a ete enregistre"); return; }
 
   c = storage::sanitize(c);
   state::setConfig(c);
@@ -178,6 +197,7 @@ void handleConfig(AsyncWebServerRequest* r) {
 
 void handleLicense(AsyncWebServerRequest* r) {
   if (!r->hasParam("key", true)) { r->send(400, "text/plain", "key requise"); return; }
+  if (refuseIfRunning(r)) return;   // une licence valide ecrit la NVS puis redemarre la carte
 
   uint32_t retry = 0;
   if (license::tryUnlock(r->getParam("key", true)->value(), retry)) {
@@ -199,6 +219,7 @@ void handleLicense(AsyncWebServerRequest* r) {
 
 void handleWifi(AsyncWebServerRequest* r) {
   if (!authValid(r)) { r->send(401, "text/plain", "auth requise"); return; }
+  if (refuseIfRunning(r)) return;
   String np;
   net::rotateApPassword(np);
   AsyncWebServerResponse* res =

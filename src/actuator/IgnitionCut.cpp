@@ -24,10 +24,12 @@ void ignition::begin() {
 }
 
 void ignition::request(uint16_t durationMs, AssistMode mode) {
+  if (durationMs == 0) return;                          // rien a couper
 #ifdef WOKWI_SIM
   const uint32_t scaledMs = static_cast<uint32_t>(durationMs) * sim::timeScale();
 #else
-  const uint32_t scaledMs = durationMs;   // build normal : aucune mise a l'echelle
+  // Build normal : aucune mise a l'echelle, et plafond absolu sur toute coupure unique.
+  const uint32_t scaledMs = (durationMs > cfg::CUT_ABS_MAX_MS) ? cfg::CUT_ABS_MAX_MS : durationMs;
 #endif
   const uint32_t proposedEnd = micros() + scaledMs * 1000UL;
   const uint8_t  m           = static_cast<uint8_t>(mode);

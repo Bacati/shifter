@@ -25,6 +25,7 @@ struct ShiftRequest {
 
 ShiftRequest peekShift();     // lit le latch sans le consommer
 void         consumeShift();  // efface le latch (apres action OU expiration de fenetre)
+bool         shifterHeld();   // niveau instantane de la broche (confirme un appui, rejette les parasites)
 
 bool pitButton();     // debounce
 bool clutchPulled();  // debounce

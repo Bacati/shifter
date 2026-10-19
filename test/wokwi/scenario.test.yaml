@@ -1,0 +1,27 @@
+# Scenario Wokwi CLI -- NON VERIFIE (aucun jeton Wokwi disponible lors de sa redaction).
+#   pio run -e wokwi
+#   wokwi-cli --scenario test/wokwi/scenario.test.yaml        (necessite WOKWI_CLI_TOKEN)
+# Le meme firmware et les memes options sont deja rejoues par test/host/test_fw_sim.cpp.
+# Env wokwi : IGNITION_SIM_SCALE=2, SIM_SHIFT_CUT_MS=100, SIM_FREEZE=1 (9000 tr/min), SIM_TIER=1 (TRACK).
+name: Aptatio ECU - simulation
+version: 1
+steps:
+  - wait-serial: "[BOOT] pret."
+  - delay: 4s
+
+  # Quickshifter : 100 ms x 2 = LED allumee ~200 ms
+  - set-control: { part-id: bShift, control: pressed, value: 1 }
+  - delay: 50ms
+  - expect-pin: { part-id: ledCut, pin: A, value: 1 }
+  - delay: 400ms
+  - expect-pin: { part-id: ledCut, pin: A, value: 0 }
+  - set-control: { part-id: bShift, control: pressed, value: 0 }
+  - delay: 500ms
+
+  # Pit limiter : 9000 tr/min > pitRpm + bande dure -> coupure continue
+  - set-control: { part-id: bPit, control: pressed, value: 1 }
+  - delay: 400ms
+  - expect-pin: { part-id: ledCut, pin: A, value: 1 }
+  - set-control: { part-id: bPit, control: pressed, value: 0 }
+  - delay: 500ms
+  - expect-pin: { part-id: ledCut, pin: A, value: 0 }

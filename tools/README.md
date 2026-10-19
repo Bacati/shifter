@@ -62,7 +62,8 @@ Si tu préfères ne jamais flasher le build `factory` :
 ```bash
 # lire la MAC : flasher esp32dev, ouvrir le moniteur -> ligne "[BOOT] HWID: AA:BB:.."
 python tools/make_key.py AA:BB:CC:DD:EE:FF TRACK        # -> la clé
-# générer une image NVS contenant licenseKey + licenseTier, puis :
+# générer une image NVS contenant licenseKey + licenseTier (ancien format, toujours lu tant que
+# l'item "lic" = "<tier>:<clé>" écrit par le firmware n'existe pas), puis :
 #   esptool.py --port COMx write_flash 0x9000 nvs.bin
 ```
 

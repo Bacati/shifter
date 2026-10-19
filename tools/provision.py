@@ -66,19 +66,11 @@ def find_prefixed(lines, prefix):
     return None
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Provisionne une carte Aptatio ECU.")
-    ap.add_argument("--port", required=True, help="port serie (COM5, /dev/ttyUSB0, ...)")
-    ap.add_argument("--tier", required=True, help="BASIC | TRACK | PRO")
-    ap.add_argument("--order", default="", help="reference de commande (journal)")
-    ap.add_argument("--baud", type=int, default=115200)
-    ap.add_argument("--mac", default="", help="force la MAC au lieu de la lire (verification)")
-    args = ap.parse_args()
-
-    tier = parse_tier(args.tier)
+def provision(port, tier, order="", baud=115200, expect_mac="", log=print):
+    """Provisionne la carte sur `port`. Leve RuntimeError en cas d'echec.
+    Retourne (mac, cle)."""
     secret = load_secret()
-
-    with serial.Serial(args.port, args.baud, timeout=0.2) as ser:
+    with serial.Serial(port, baud, timeout=0.2) as ser:
         time.sleep(1.5)                      # la carte reset a l'ouverture du port
         macline = None
         seen = []
@@ -90,28 +82,29 @@ def main() -> None:
             if macline:
                 break
         if not macline:
-            sys.exit("pas de reponse 'MAC ...' de la carte. Recu :\n  "
-                     + "\n  ".join(seen[-20:])
-                     + "\n(la carte est-elle flashee avec  pio run -e factory  ?)")
+            raise RuntimeError("pas de reponse 'MAC ...' de la carte. Recu :\n  "
+                               + "\n  ".join(seen[-20:])
+                               + "\n(la carte est-elle flashee avec  pio run -e factory  ?)")
         mac = normalise_mac(macline.split(None, 1)[1])
 
-        if args.mac and normalise_mac(args.mac) != mac:
-            sys.exit(f"MAC lue {mac} != MAC attendue {normalise_mac(args.mac)}")
+        if expect_mac and normalise_mac(expect_mac) != mac:
+            raise RuntimeError(f"MAC lue {mac} != MAC attendue {normalise_mac(expect_mac)}")
 
         key = make_key(secret, mac, tier)
-        print(f"MAC   : {mac}")
-        print(f"tier  : {TIER_NAME[tier]}")
-        print(f"cle   : {key}")
+        log(f"MAC   : {mac}")
+        log(f"tier  : {TIER_NAME[tier]}")
+        log(f"cle   : {key}")
 
         send(ser, f"KEY {key}")
         lines = read_lines(ser)
         ok = find_prefixed(lines, "OK tier=")
         if not ok:
-            sys.exit("echec : la carte n'a pas accepte la cle. Recu :\n  " + "\n  ".join(lines))
+            raise RuntimeError("echec : la carte n'a pas accepte la cle. Recu :\n  "
+                               + "\n  ".join(lines))
         applied = int(ok.split("tier=")[1].split()[0])
         if applied != tier:
-            sys.exit(f"tier applique {applied} != demande {tier}")
-        print(f"OK    : carte provisionnee en {TIER_NAME[applied]}")
+            raise RuntimeError(f"tier applique {applied} != demande {tier}")
+        log(f"OK    : carte provisionnee en {TIER_NAME[applied]}")
 
     new = not LOG.exists()
     with LOG.open("a", newline="", encoding="utf-8") as f:
@@ -119,8 +112,23 @@ def main() -> None:
         if new:
             w.writerow(["timestamp", "mac", "tier", "key", "order"])
         w.writerow([dt.datetime.now().isoformat(timespec="seconds"),
-                    mac, TIER_NAME[tier], key, args.order])
-    print(f"journalise -> {LOG}")
+                    mac, TIER_NAME[tier], key, order])
+    log(f"journalise -> {LOG}")
+    return mac, key
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Provisionne une carte Aptatio ECU.")
+    ap.add_argument("--port", required=True, help="port serie (COM5, /dev/ttyUSB0, ...)")
+    ap.add_argument("--tier", required=True, help="BASIC | TRACK | PRO")
+    ap.add_argument("--order", default="", help="reference de commande (journal)")
+    ap.add_argument("--baud", type=int, default=115200)
+    ap.add_argument("--mac", default="", help="force la MAC au lieu de la lire (verification)")
+    args = ap.parse_args()
+    try:
+        provision(args.port, parse_tier(args.tier), args.order, args.baud, args.mac)
+    except RuntimeError as ex:
+        sys.exit(str(ex))
 
 
 if __name__ == "__main__":

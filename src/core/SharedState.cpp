@@ -76,7 +76,9 @@ void state::setWaterTemp(int tempX10, bool ok) {
 }
 void state::getWaterTemp(int& tempX10, bool& ok) {
   tempX10 = s_waterTempX10.load();
-  ok      = s_waterTempOk.load() != 0;
+  // "ok" inclut la fraicheur : une tache figee ne laisse pas une valeur perimee passer pour vraie.
+  ok      = s_waterTempOk.load() != 0 &&
+            static_cast<uint32_t>(millis() - s_waterTempMs.load()) < cfg::WATER_TEMP_STALE_MS;
 }
 uint32_t state::lastWaterTempMs() { return s_waterTempMs.load(); }
 

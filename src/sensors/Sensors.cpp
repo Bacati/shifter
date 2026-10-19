@@ -33,6 +33,9 @@ volatile uint32_t s_shiftLastUs  = 0;
 int      s_rpmFiltered  = 0;
 int      s_rpmInstant   = 0;
 uint32_t s_seenSeq      = 0;
+int      s_lockCount    = 0;   // periodes coherentes consecutives depuis l'arret
+uint32_t s_lockPrev     = 0;   // periode precedente (us)
+int      s_badStreak    = 0;   // periodes consecutives incoherentes alors que verrouille
 
 uint32_t s_lastSpeedMs  = 0;
 bool     s_speedSeeded  = false;
@@ -42,6 +45,10 @@ uint32_t s_frontPrevLastUs = 0;
 uint32_t s_rearPrevLastUs  = 0;
 float    s_frontSpeedKmh   = 0.0f;
 float    s_rearSpeedKmh    = 0.0f;
+float    s_frontMeasKmh    = 0.0f;   // derniere vitesse MESUREE (non decroissante) de la roue avant
+uint32_t s_frontPulseUs    = 0;      // instant de la derniere impulsion avant vue par la tache
+float    s_slipHist[cfg::SLIP_CONFIRM_WINDOWS] = {0};   // glisses brutes recentes (filtre anti-parasite)
+uint8_t  s_slipHistIdx     = 0;
 
 struct Debounced {
   bool     stable  = false;
@@ -127,6 +134,9 @@ void updateRpm() {
       state::setRpmInstant(0);
       resetDynamics();
     }
+    s_lockCount = 0;
+    s_lockPrev  = 0;
+    s_badStreak = 0;
     s_seenSeq = seq;
     return;
   }
@@ -138,9 +148,37 @@ void updateRpm() {
   if (inst > cfg::RPM_MAX_PLAUSIBLE) inst = cfg::RPM_MAX_PLAUSIBLE;  // borne dure
 
   if (s_rpmInstant == 0) {
+    // Pas encore verrouille : on exige des periodes coherentes ET plausibles pour un moteur
+    // (<= OVERREV_RPM). Du bruit aleatoire (ou continu, ~19 000 tr/min) ne verrouille jamais.
+    const bool plausible = delta >= 60000000UL / cfg::OVERREV_RPM;
+    if (!plausible) {
+      s_lockCount = 0;
+      s_lockPrev  = 0;
+      return;
+    }
+    const uint32_t diff = (delta > s_lockPrev) ? delta - s_lockPrev : s_lockPrev - delta;
+    const bool consistent = s_lockPrev != 0 && diff * 100UL <= s_lockPrev * cfg::RPM_LOCK_TOL_PCT;
+    s_lockCount = consistent ? s_lockCount + 1 : 0;
+    s_lockPrev  = delta;
+    if (s_lockCount < cfg::RPM_LOCK_CONSISTENT) return;
     s_rpmInstant  = inst;
     s_rpmFiltered = inst;
+    s_badStreak = 0;
   } else {
+    // Verrouille : le signal reste-t-il compatible avec un moteur ? (arret + bruit -> non)
+    const float expected = 60000000.0f / static_cast<float>(s_rpmFiltered > 0 ? s_rpmFiltered : 1);
+    if (delta < cfg::RPM_BAD_LO * expected || delta > cfg::RPM_BAD_HI * expected) {
+      if (++s_badStreak >= cfg::RPM_UNLOCK_BAD) {
+        s_rpmFiltered = s_rpmInstant = 0;
+        state::setRpmFiltered(0);
+        state::setRpmInstant(0);
+        resetDynamics();
+        s_lockCount = 0; s_lockPrev = 0; s_badStreak = 0;
+        return;
+      }
+    } else {
+      s_badStreak = 0;
+    }
     // Limitation de pente TEMPORELLE : la variation admise est proportionnelle a
     // la duree ecoulee, pas fixe par impulsion. On CLAMPE (on ne rejette pas) ->
     // un spike EMI est borne, et une impulsion manquee ne "latche" pas
@@ -163,7 +201,7 @@ void updateRpm() {
 //  + rejet des valeurs impossibles (glitch) et limitation de pente (slew).
 float wheelSpeedKmh(uint32_t count, uint32_t firstUs, uint32_t lastUs,
                     uint32_t& prevLastUs, float& lastSpeed,
-                    float distPerPulseMm, uint32_t nowUs) {
+                    float distPerPulseMm, uint32_t nowUs, uint32_t stopUs) {
   const float k = distPerPulseMm / 1000.0f * 3.6f;   // mm/us -> km/h : (m) / (s) * 3.6
   float v;
 
@@ -177,7 +215,7 @@ float wheelSpeedKmh(uint32_t count, uint32_t firstUs, uint32_t lastUs,
     prevLastUs = lastUs;
   } else {
     const uint32_t sinceUs = nowUs - prevLastUs;
-    if (sinceUs > cfg::WHEEL_STOP_US) { lastSpeed = 0.0f; return 0.0f; }
+    if (sinceUs > stopUs) { lastSpeed = 0.0f; return 0.0f; }
     const float vmax = (sinceUs > 0) ? k / (sinceUs / 1000000.0f) : lastSpeed;
     v = fminf(lastSpeed, vmax);
   }
@@ -212,18 +250,43 @@ void updateDynamics() {
   const int       ppr = (c.pulsesPerRev < 1) ? 1 : c.pulsesPerRev;
   const float distPerPulseMm = static_cast<float>(c.wheelCircumMm) / static_cast<float>(ppr);
 
+  // Delai avant de declarer la roue arretee : au moins WHEEL_STOP_US, et assez long pour que
+  // WHEEL_STOP_KMH produise encore des impulsions (sinon, avec peu d'impulsions/tour, une roue
+  // qui tourne lentement serait lue comme arretee -- ex. 1 impulsion/tour : < 15 km/h = "0").
+  const float stopF = distPerPulseMm * (3.6f / cfg::WHEEL_STOP_KMH) * 1000.0f;   // us
+  uint32_t stopUs = (stopF > static_cast<float>(cfg::WHEEL_STOP_MAX_US)) ? cfg::WHEEL_STOP_MAX_US
+                                                                          : static_cast<uint32_t>(stopF);
+  if (stopUs < cfg::WHEEL_STOP_US) stopUs = cfg::WHEEL_STOP_US;
+
   uint32_t fc, ff, fl, rc, rf, rl;
   portENTER_CRITICAL(&s_mux);
   fc = s_frontCount; ff = s_frontFirstUs; fl = s_frontLastUs; s_frontCount = 0;
   rc = s_rearCount;  rf = s_rearFirstUs;  rl = s_rearLastUs;  s_rearCount  = 0;
   portEXIT_CRITICAL(&s_mux);
 
-  const float vFront = wheelSpeedKmh(fc, ff, fl, s_frontPrevLastUs, s_frontSpeedKmh, distPerPulseMm, nowUs);
-  const float vRear  = wheelSpeedKmh(rc, rf, rl, s_rearPrevLastUs,  s_rearSpeedKmh,  distPerPulseMm, nowUs);
+  const float vFront = wheelSpeedKmh(fc, ff, fl, s_frontPrevLastUs, s_frontSpeedKmh, distPerPulseMm, nowUs, stopUs);
+  if (fc > 0) { s_frontMeasKmh = vFront; s_frontPulseUs = fl; }
+  const float vRear  = wheelSpeedKmh(rc, rf, rl, s_rearPrevLastUs,  s_rearSpeedKmh,  distPerPulseMm, nowUs, stopUs);
 
-  float slip = 0.0f;
-  if (vFront > cfg::SLIP_MIN_SPEED_KMH)
-    slip = (vRear - vFront) / vFront * 100.0f;
+  // Roue avant "vivante" ? Sinon (capteur debranche) sa vitesse estimee decroit et ferait une fausse glisse.
+  bool frontFresh = false;
+  if (s_frontMeasKmh > 0.5f) {
+    const float periodUs = (distPerPulseMm / 1000.0f) / (s_frontMeasKmh / 3.6f) * 1000000.0f;
+    float limitUs = periodUs * cfg::SLIP_FRONT_FRESH_PERIODS;
+    if (limitUs < static_cast<float>(cfg::SLIP_FRONT_FRESH_MIN_US)) limitUs = static_cast<float>(cfg::SLIP_FRONT_FRESH_MIN_US);
+    frontFresh = static_cast<float>(static_cast<uint32_t>(nowUs - s_frontPulseUs)) < limitUs;
+  }
+
+  float slipRaw = 0.0f;
+  if (frontFresh && vFront > cfg::SLIP_MIN_SPEED_KMH)
+    slipRaw = (vRear - vFront) / vFront * 100.0f;
+  // Glisse retenue = minimum des SLIP_CONFIRM_WINDOWS dernieres fenetres : un parasite sur une roue
+  // (qui fausse 2 intervalles consecutifs) ne produit pas de coupure, une vraie perte
+  // d'adherence (plusieurs centaines de ms) est vue avec ~SLIP_CONFIRM_WINDOWS x SPEED_CALC_MS de retard.
+  s_slipHist[s_slipHistIdx] = slipRaw;
+  s_slipHistIdx = static_cast<uint8_t>((s_slipHistIdx + 1) % cfg::SLIP_CONFIRM_WINDOWS);
+  float slip = s_slipHist[0];
+  for (int i = 1; i < cfg::SLIP_CONFIRM_WINDOWS; ++i) slip = fminf(slip, s_slipHist[i]);
 
   const float dtSec   = dtMs / 1000.0f;
   const float rawRate = (slip - s_lastSlip) / dtSec;
@@ -291,6 +354,7 @@ void sensors::consumeShift() {
   portEXIT_CRITICAL(&s_mux);
 }
 
+bool sensors::shifterHeld()  { return digitalRead(pins::SHIFTER) == LOW; }
 bool sensors::pitButton()    { return s_pit.stable; }
 bool sensors::clutchPulled() { return s_clutch.stable; }
 bool sensors::engineStalled() { return state::getRpmFiltered() == 0; }

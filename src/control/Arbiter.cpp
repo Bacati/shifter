@@ -63,11 +63,28 @@ Decision evalOverrev() {
 }
 
 // ---------------------------------------------------------------------- PIT
-Decision evalPit(const EcuConfig& c, int rpm) {
-  if (!sensors::pitButton() || rpm <= c.pitRpm) return NONE;
+// Limiteur de voie des stands : en VITESSE (km/h, roue la plus rapide des deux -> une roue qui
+// patine ne laisse pas passer la moto). Repli sur le REGIME (pitRpm) si aucune roue ne donne de
+// vitesse (capteurs HS, ou moto a l'arret en train d'emballer le moteur dans le box).
+Decision evalPit(const EcuConfig& c, int rpm, float frontKmh, float rearKmh) {
+  if (!sensors::pitButton()) return NONE;
+
+  const float speed = (frontKmh > rearKmh) ? frontKmh : rearKmh;
+  bool over, hard;
+  if (speed > cfg::PIT_SPEED_VALID_KMH) {
+    over = speed > static_cast<float>(c.pitKmh);
+    hard = speed > static_cast<float>(c.pitKmh) + cfg::PIT_HARD_BAND_KMH;
+  } else {
+    over = rpm > c.pitRpm;
+    hard = rpm > c.pitRpm + cfg::PIT_HARD_BAND_RPM;
+  }
+  if (!over) return NONE;
+
   const uint32_t now = millis();
   if (now - s_lastPitMs < cfg::PIT_PERIOD_MS) return NONE;
   s_lastPitMs = now;
+  // Au-dela de la bande dure : coupure continue (le limiteur doit limiter meme plein gaz).
+  if (hard) return {static_cast<uint16_t>(cfg::PIT_PERIOD_MS), AssistMode::PitLimit};
   return {cfg::PIT_CUT_MS, AssistMode::PitLimit};
 }
 
@@ -76,11 +93,19 @@ Decision evalShift(const EcuConfig& c, int rpm) {
   const sensors::ShiftRequest s = sensors::peekShift();
   if (!s.pending) return NONE;
 
+  const uint32_t age = static_cast<uint32_t>(micros() - s.triggeredMicros);
+
   // Fenetre d'analyse ecoulee : on abandonne cet appui.
-  if (static_cast<uint32_t>(micros() - s.triggeredMicros) >= cfg::SHIFT_WINDOW_US) {
+  if (age >= cfg::SHIFT_WINDOW_US) {
     sensors::consumeShift();
     return NONE;
   }
+  // Confirmation anti-parasite : la broche doit etre BASSE au moins SHIFT_CONFIRM_US apres le front.
+  // Un pic EMI de quelques us a declenche l'ISR mais la broche est deja repassee a HIGH : il expire
+  // avec la fenetre sans jamais couper. Un vrai appui rebondissant finit par etre vu bas.
+  if (age < cfg::SHIFT_CONFIRM_US) return NONE;
+  if (!sensors::shifterHeld()) return NONE;   // pas (ou plus) appuye : on garde le latch jusqu'a la fin de
+                                              // la fenetre (rebond de contact = la broche rebaisse ; parasite = non)
 
   const uint32_t now = millis();
   if (rpm >= c.minShiftRpm && (now - s_lastShiftMs) >= cfg::SHIFT_LOCKOUT_MS) {
@@ -92,8 +117,11 @@ Decision evalShift(const EcuConfig& c, int rpm) {
 }
 
 // ------------------------------------------------------------------- LAUNCH
-Decision evalLaunch(const EcuConfig& c, int rpm, float speedFrontKmh) {
-  if (!sensors::clutchPulled() || speedFrontKmh >= cfg::LAUNCH_SPEED_MAX_KMH) return NONE;
+Decision evalLaunch(const EcuConfig& c, int rpm, float speedFrontKmh, float speedRearKmh) {
+  // Les DEUX roues doivent etre quasi arretees : un capteur avant mort/debranche lit 0 et
+  // ferait passer une moto en mouvement (embrayage tire) pour une moto a l'arret.
+  if (!sensors::clutchPulled() || speedFrontKmh >= cfg::LAUNCH_SPEED_MAX_KMH ||
+      speedRearKmh >= cfg::LAUNCH_SPEED_MAX_KMH) return NONE;
   s_slipArmed = false;  // en zone launch, on desarme le slip control
 
   const uint32_t now = millis();
@@ -103,9 +131,12 @@ Decision evalLaunch(const EcuConfig& c, int rpm, float speedFrontKmh) {
   if (diff <= -cfg::LAUNCH_ARM_BAND_RPM) return NONE;  // trop loin sous la cible
 
   s_lastLaunchMs = now;
-  const int ms = constrain(cfg::LAUNCH_CUT_MIN_MS + diff / 50,
-                           static_cast<int>(cfg::LAUNCH_CUT_MIN_MS),
-                           static_cast<int>(cfg::LAUNCH_CUT_MAX_MS));
+  int ms = constrain(cfg::LAUNCH_CUT_MIN_MS + diff / 50,
+                     static_cast<int>(cfg::LAUNCH_CUT_MIN_MS),
+                     static_cast<int>(cfg::LAUNCH_CUT_MAX_MS));
+  // Bande dure : le regime depasse nettement la cible -> coupure continue (2-step), sinon un
+  // moteur a vide gagne plus de regime que la modulation (<= 40 % de coupure) n'en retire.
+  if (diff > cfg::LAUNCH_HARD_BAND_RPM) ms = static_cast<int>(cfg::LAUNCH_PERIOD_MS);
   return {static_cast<uint16_t>(ms), AssistMode::Launch};
 }
 
@@ -163,11 +194,12 @@ void arbiter::update() {
   int frontX10, rearX10;
   state::getSpeeds(frontX10, rearX10);
   const float speedFrontKmh = frontX10 / 10.0f;
+  const float speedRearKmh  = rearX10 / 10.0f;
 
   Decision d = evalOverrev();
-  if (d.cutMs == 0) d = evalPit(c, rpm);
+  if (d.cutMs == 0) d = evalPit(c, rpm, speedFrontKmh, speedRearKmh);
   if (d.cutMs == 0) d = evalShift(c, rpm);
-  if (d.cutMs == 0 && lic >= LicenseTier::Track) d = evalLaunch(c, rpm, speedFrontKmh);
+  if (d.cutMs == 0 && lic >= LicenseTier::Track) d = evalLaunch(c, rpm, speedFrontKmh, speedRearKmh);
   if (d.cutMs == 0 && lic >= LicenseTier::Pro)   d = evalSlip(c, speedFrontKmh);
 
   if (d.cutMs > 0) ignition::request(d.cutMs, d.mode);

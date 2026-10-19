@@ -31,7 +31,7 @@ l'étincelle. Priorité décroissante :
 | Prio | Assistance | Rôle | Licence |
 |---|---|---|---|
 | 1 | **Overrev limiter** | Coupe au-delà de `OVERREV_RPM` (défaut 16 000). Filet de survie moteur. Écrase tout. | toutes |
-| 2 | **Pit limiter** | Bride le régime dans la voie des stands (bouton au guidon). | toutes |
+| 2 | **Pit limiter** | Bride la **vitesse** (km/h, réglage `pitKmh`) dans la voie des stands (bouton au guidon) ; repli sur le régime si les capteurs de roue sont muets. | toutes |
 | 3 | **Quickshifter** | Coupure nette (~50 ms) sur appui sélecteur : libère les crabots sans débrayer. Fenêtre d'analyse 25 ms, verrou anti double-coupure 250 ms. | toutes |
 | 4 | **Launch control** | 2-step limiter au départ arrêté (embrayage tiré, moto ~immobile). Charge l'échappement sans emballer le moteur. | TRACK + |
 | 5 | **Slip control** | Motricité **en ligne droite** : compare roue avant (libre) / arrière (motrice), coupe si la glisse dépasse `maxSlipPercent`. **Pas de TC sur l'angle** (voir 1.4). | PRO |
@@ -148,11 +148,13 @@ Environnements PlatformIO : `esp32dev` (prod), `wokwi` (simu, WiFi coupé),
 - `state::setLean` / `setSpeeds` / `setSlip` écrivent plusieurs atomiques
   séparément → un lecteur peut voir un jeu « à moitié à jour ». Toléré pour un
   garde-fou à hystérésis ; ajouter un seqlock si besoin de garantie stricte.
-- La tâche IMU n'est pas surveillée par un watchdog : bus I²C bloqué → tâche figée
-  (sûr : slip désactivé) mais morte jusqu'au reboot.
+- La tâche IMU n'a pas de watchdog dédié, mais sa fraîcheur est contrôlée par l'arbitre (slip coupé) et elle se
+  ré-initialise seule après une panne (voir `AUDIT.md`).
 - Le superviseur fait `esp_restart()` depuis une tâche : collision improbable mais
   possible avec une écriture OTA en cours.
-- **Aucun test unitaire**, aucune protection anti-régression.
+- **Banc de test PC** (237 tests, `python test/host/run_tests.py`) : il exécute le vrai code contre des capteurs
+  simulés, mais ne remplace pas les essais matériel (courses ISR/tâches, EMI, flash, réglages) — voir
+  `AUDIT.md` §4 et `test/host/README.md`.
 
 ---
 
@@ -296,6 +298,8 @@ Ne pas sauter d'étape. À chaque phase : moteur coupé sauf mention contraire.
 
 ## 7. Voir aussi
 
+- [`AUDIT.md`](AUDIT.md) — audit du code (bugs corrigés, points ouverts) et
+  préparation du bus CAN / carte mère commune.
 - [`BUILD.md`](BUILD.md) — build, câblage, environnements, modèle de sécurité,
   changements vs V22.1, matrice de test simu.
 - [`tools/README.md`](tools/README.md) — génération de clés, provisioning usine,

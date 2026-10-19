@@ -6,12 +6,14 @@
 // ============================================================================
 
 // L'ordre = la priorite stricte de l'arbitre. Valeur haute = prioritaire.
+// Overrev (survie moteur) > Pit limiter (voie des stands : prend le dessus sur toutes les
+// assistances) > Quickshifter > Launch > Slip.
 enum class AssistMode : uint8_t {
   Idle     = 0,
-  PitLimit = 1,
+  Slip     = 1,
   Launch   = 2,
-  Slip     = 3,
-  Shift    = 4,
+  Shift    = 3,
+  PitLimit = 4,
   Overrev  = 5,
 };
 static constexpr uint8_t kAssistModeCount = 6;
@@ -38,7 +40,8 @@ struct EcuConfig {
   int maxSlipPercent;  // tolerance de glisse du slip control
   int wheelCircumMm;   // circonference de roue (capteurs de vitesse)
   int pulsesPerRev;    // impulsions par tour des capteurs de roue
-  int pitRpm;          // plafond regime en voie des stands
+  int pitRpm;          // plafond regime en voie des stands (repli si les capteurs de roue sont muets)
+  int pitKmh;          // vitesse maxi en voie des stands (km/h) : limiteur principal
 };
 
 inline const char* toString(AssistMode m) {

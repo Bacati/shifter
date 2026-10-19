@@ -65,7 +65,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   <h3>Cartographie &amp; limites</h3>
   <label>Cut shifter (ms)<input id="shiftCutMs" type="number"></label>
   <label>RPM min shifter<input id="minShiftRpm" type="number"></label>
-  <label>Pit limiter (RPM)<input id="pitRpm" type="number"></label>
+  <label>Pit limiter : vitesse max (km/h)<input id="pitKmh" type="number"></label>
+  <label>Pit limiter : repli regime (RPM)<input id="pitRpm" type="number"></label>
+  <p class="hint">Sans capteurs de roue (licence BASIC) la vitesse est inconnue : le limiteur utilise ce regime.
+  Calcul pour la vitesse voulue, dans le rapport engage en voie des stands (circonference de roue ci-dessous).</p>
+  <label>Rapport total moteur/roue (tours moteur pour 1 tour de roue)<input id="pitRatio" type="number" step="0.01" placeholder="ex. 9.50"></label>
+  <button id="btnPitCalc" class="alt">Calculer le regime pour cette vitesse</button>
+  <p class="hint" id="pitCalcOut"></p>
   <label>Circonference roue (mm)<input id="wheelCircumMm" type="number"></label>
   <label>Impulsions / tour<input id="pulsesPerRev" type="number"></label>
   <label>Launch RPM <span class="tag">TRACK</span><input id="launchRpm" type="number"></label>
@@ -99,7 +105,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 <script>
 (function(){
   var $=function(id){return document.getElementById(id);};
-  var FIELDS=['shiftCutMs','minShiftRpm','pitRpm','wheelCircumMm','pulsesPerRev','launchRpm','maxSlipPercent'];
+  var FIELDS=['shiftCutMs','minShiftRpm','pitRpm','pitKmh','wheelCircumMm','pulsesPerRev','launchRpm','maxSlipPercent'];
   var TOKEN='';
   try{TOKEN=sessionStorage.getItem('ecu_token')||'';}catch(e){}
 
@@ -121,6 +127,16 @@ static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
       $('maxSlipPercent').disabled=!d.proUnlocked;
     }).catch(function(){});
   }
+  // Regime moteur correspondant a une vitesse, dans un rapport donne (moto sans capteurs de roue).
+  function pitRpmFor(kmh,circMm,ratio){ return Math.round(kmh/3.6/(circMm/1000)*60*ratio); }
+  $('btnPitCalc').addEventListener('click',function(){
+    var kmh=+$('pitKmh').value, circ=+$('wheelCircumMm').value, ratio=+$('pitRatio').value, o=$('pitCalcOut');
+    if(!(kmh>0&&circ>0&&ratio>0)){ o.textContent='Renseignez vitesse, circonference et rapport.'; return; }
+    var rpm=pitRpmFor(kmh,circ,ratio);
+    if(rpm<2000||rpm>10000){ o.textContent=rpm+' tr/min : hors de la plage 2000..10000, verifiez le rapport.'; return; }
+    $('pitRpm').value=rpm;
+    o.textContent=kmh+' km/h = '+rpm+' tr/min dans CE rapport (valable seulement dans ce rapport, embrayage non patine). Cliquez "Flasher NVRAM".';
+  });
   loadState();
 
   $('btnLogin').addEventListener('click',function(){
@@ -134,7 +150,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   $('btnSave').addEventListener('click',function(){
     if(!TOKEN){ $('authState').textContent='Connectez-vous d’abord'; return; }
     var data={};
-    ['shiftCutMs','minShiftRpm','pitRpm','wheelCircumMm','pulsesPerRev'].forEach(function(k){data[k]=$(k).value;});
+    ['shiftCutMs','minShiftRpm','pitRpm','pitKmh','wheelCircumMm','pulsesPerRev'].forEach(function(k){data[k]=$(k).value;});
     if(!$('launchRpm').disabled) data.launchRpm=$('launchRpm').value;
     if(!$('maxSlipPercent').disabled) data.maxSlipPercent=$('maxSlipPercent').value;
     fetch('/api/config',{method:'POST',
