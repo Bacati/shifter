@@ -24,7 +24,7 @@ static void cmd(const char* c) { host::serialIn(std::string(c) + "\n"); host::ru
 TEST(sim_demarrage_logs_et_6_clignotements) {
   boot();
   host::runFor(SEC(4));
-  CHECK(host::serialContains("[BOOT] Aptatio ECU v"));
+  CHECK(host::serialContains("[BOOT] TTP ECU v"));
   CHECK(host::serialContains("MODE SIMULATION WOKWI"));
   CHECK(host::serialContains("[SIM] WiFi / serveur web desactives"));
   CHECK(host::serialContains("[LIC] SIMULATION -> tier 1"));

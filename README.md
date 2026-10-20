@@ -1,8 +1,8 @@
-# Aptatio ECU — 50cc 2 Temps (allumage PVL)
+# TTP ECU — 50cc 2 Temps (allumage PVL)
 
 Calculateur de gestion moteur sur ESP32 pour moto de course 50cc 2T à allumage
 autonome (type PVL) : **quickshifter, launch control, pit limiter, limiteur
-d'overrev, contrôle de motricité (slip control) et télémétrie WiFi**.
+d'overrev, contrôle de motricité (slip control) et télémétrie WiFi (PRO)**.
 
 Seule arme d'action : la **coupure d'allumage** (pas de Ride-by-Wire sur un
 carburateur). Sur un PVL, « couper » = mettre le primaire à la masse via un
@@ -48,7 +48,11 @@ Un seul binaire, bridage **à l'exécution** par une clé liée au HWID (adresse
 |---|---|
 | **BASIC** (par défaut, aucune clé) | Overrev + Pit + Quickshifter |
 | **TRACK** | + Launch control |
-| **PRO** | + Slip control |
+| **PRO** | + Slip control + **télémétrie temps réel & data-log** (RPM, vitesses, glisse, roulis/IMU, température eau affichés en direct) |
+
+En dessous de PRO, le flux `/events` (SSE) n'envoie que `{"tier":…,"locked":true}` : aucune valeur capteur
+n'est transmise en BASIC / TRACK. Le garde-fou IMU et la lecture de la température eau restent
+actifs en interne pour tous les tiers ; seul leur affichage en direct est réservé au PRO.
 
 `clé = HEX_MAJ( HMAC-SHA256( SECRET , "<MAC>:<tier>" ) )[0..15]`. Le `SECRET` est
 dans `src/persistence/secrets.h` (gitignoré). Génération / provisioning : voir
@@ -93,7 +97,7 @@ N'affecte **que** le slip control (launch = à l'arrêt moto droite ; overrev / 
 
 L'ESP32 génère son propre AP WiFi **WPA2 avec mot de passe unique par appareil**
 (généré au 1er boot, imprimé sur le port série). Page web embarquée :
-- **Télémétrie live** (SSE) : RPM, vitesses, glisse, roulis, état IMU, température eau, mode arbitre, licence.
+- **Télémétrie live** (SSE, **PRO uniquement** ; message « réservé PRO » sinon) : RPM, vitesses, glisse, roulis, état IMU, température eau, mode arbitre, licence.
 - **Cartographie** : temps de coupure, régimes limites, circonférence pneu,
   tolérance de glisse — clampés, sauvegardés en NVRAM.
 - **Licence** : saisie de clé d'upgrade.
@@ -184,7 +188,7 @@ Ne pas sauter d'étape. À chaque phase : moteur coupé sauf mention contraire.
    le comportement attendu).
 3bis. `[TEMP] DS18B20 OK` (ou `absent` → la télémétrie affichera « capteur
    absent » ; sans impact sur les assistances, c'est informatif).
-4. **WiFi** : rejoindre `AptatioECU-XXXXXX` avec le mot de passe imprimé. Ouvrir
+4. **WiFi** : rejoindre `TTPECU-XXXXXX` avec le mot de passe imprimé. Ouvrir
    `http://192.168.4.1` → la page s'affiche.
 5. **Auth** : `POST /api/config` refusé sans jeton. Login avec le PIN. Modifier
    une valeur → *Flasher NVRAM* → reboot → valeur conservée (NVS).
@@ -279,7 +283,7 @@ Ne pas sauter d'étape. À chaque phase : moteur coupé sauf mention contraire.
 5. **Ne pas « tester » le garde-fou anti-angle en se couchant fort** dès les
    premiers tours : faire confiance à la validation banc (§4.2 pt 10). C'est un
    limiteur de sécurité, pas une fonction à sonder à vitesse.
-6. **Data-log** via la télémétrie à chaque run, relire entre les runs.
+6. **Data-log** via la télémétrie (licence PRO requise) à chaque run, relire entre les runs.
 7. Plan « l'ECU fait n'importe quoi » : coupe-circuit ; un reset rend l'étincelle
    (pull-down).
 

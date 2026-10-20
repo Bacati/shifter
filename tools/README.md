@@ -1,4 +1,4 @@
-# Provisioning & chiffrement — Aptatio ECU
+# Provisioning & chiffrement — TTP ECU
 
 Chaîne d'outils pour **programmer une carte à la commande** (tier BASIC / TRACK / PRO)
 et, en production, **chiffrer la flash** pour protéger le secret de licence.

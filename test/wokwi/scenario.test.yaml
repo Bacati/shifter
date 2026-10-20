@@ -3,7 +3,7 @@
 #   wokwi-cli --scenario test/wokwi/scenario.test.yaml        (necessite WOKWI_CLI_TOKEN)
 # Le meme firmware et les memes options sont deja rejoues par test/host/test_fw_sim.cpp.
 # Env wokwi : IGNITION_SIM_SCALE=2, SIM_SHIFT_CUT_MS=100, SIM_FREEZE=1 (9000 tr/min), SIM_TIER=1 (TRACK).
-name: Aptatio ECU - simulation
+name: TTP ECU - simulation
 version: 1
 steps:
   - wait-serial: "[BOOT] pret."

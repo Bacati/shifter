@@ -6,6 +6,7 @@
 #include "src/actuator/IgnitionCut.h"
 #include "src/net/Telemetry.h"
 #include "src/net/WebServer.h"
+#include "src/persistence/License.h"
 
 // ---- doublures du serveur web ----------------------------------------------------------
 static size_t g_clients = 1;
@@ -19,8 +20,10 @@ static bool g_frozen = false;
 static void startLoop() {
   host::every(host::nowUs, 200, [] { if (!g_frozen) { ignition::service(); state::beatEngineLoop(); } return true; });
 }
-static void bootSup() {
+static void bootSup(LicenseTier t = LicenseTier::Pro) {
   host::nowUs = SEC(1);
+  host::nvs.clear(); license::begin();                 // RAM remise a BASIC (NVS vide)
+  if (t != LicenseTier::Basic) { uint32_t r = 0; if (!license::tryUnlock(license::expectedKey(t), r)) host::fail(__FILE__, __LINE__, "tryUnlock refuse"); }
   state::begin(); ignition::begin(); state::beatEngineLoop();
   telemetry::startTasks();
   startLoop();
@@ -121,4 +124,35 @@ TEST(sse_etat_complet_present) {
   CHECK(m.find("\"waterTemp\":88.1") != std::string::npos);
   CHECK(m.find("\"waterOk\":true") != std::string::npos);
   CHECK(m.find("\"lean\":12.3") != std::string::npos);
+}
+
+// ---- telemetrie reservee PRO : en dessous, AUCUNE valeur capteur dans le flux ------------------
+static void lockedCase(LicenseTier t, const char* name) {
+  bootSup(t);
+  state::setRpmFiltered(7000); state::setWaterTemp(881, true); state::setLean(123, 100, true);
+  state::setSpeeds(1234, 1300); state::setSlip(105, 0);
+  g_sse.clear(); host::runFor(SEC(2));
+  CHECK_MSG(!g_sse.empty(), "pas de trame %s", name);
+  const std::string expect = std::string("telemetry|{\"tier\":\"") + toString(t) + "\",\"locked\":true}";
+  for (auto& m : g_sse) {
+    CHECK_MSG(m == expect, "trame inattendue: %s", m.c_str());
+    for (const char* k : {"rpm", "speed", "slip", "lean", "imu", "waterTemp", "waterOk", "mode"})
+      CHECK_MSG(m.find(std::string("\"") + k + "\"") == std::string::npos, "champ %s fuit en %s", k, name);
+  }
+}
+TEST(sse_basic_trame_verrouillee_sans_donnees) { lockedCase(LicenseTier::Basic, "BASIC"); }
+TEST(sse_track_trame_verrouillee_sans_donnees) { lockedCase(LicenseTier::Track, "TRACK"); }
+TEST(sse_pro_trame_complete_sans_locked) {
+  bootSup(LicenseTier::Pro);
+  state::setRpmFiltered(7000); state::setWaterTemp(881, true); state::setLean(123, 100, true);
+  state::setSpeeds(1234, 1300); state::setSlip(105, 0);
+  g_sse.clear(); host::runFor(MS(500));
+  CHECK(!g_sse.empty());
+  for (auto& m : g_sse) {
+    CHECK(m.find("locked") == std::string::npos);
+    CHECK(m.find("\"rpm\":7000") != std::string::npos);
+    CHECK(m.find("\"speed\":123.4") != std::string::npos);
+    CHECK(m.find("\"slip\":10.5") != std::string::npos);
+    CHECK(m.find("\"tier\":\"PRO") != std::string::npos);
+  }
 }

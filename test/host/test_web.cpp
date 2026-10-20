@@ -48,7 +48,7 @@ TEST(web_racine_en_tetes_de_securite) {
   auto& h = r->sent->headers;
   CHECK(h.count("Content-Security-Policy") && h["Content-Security-Policy"].find("default-src 'none'") != std::string::npos);
   CHECK(h["X-Content-Type-Options"] == "nosniff" && h["Cache-Control"] == "no-store");
-  CHECK(r->sent->body.find("<title>Aptatio ECU</title>") != std::string::npos);
+  CHECK(r->sent->body.find("<title>TTP ECU</title>") != std::string::npos);
   CHECK_MSG(r->sent->body.find("src=\"http") == std::string::npos, "ressource externe dans la page");
 }
 TEST(web_page_calculateur_pit_basic_present) {

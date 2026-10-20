@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provisioning automatise d'une carte Aptatio ECU.
+"""Provisioning automatise d'une carte TTP ECU.
 
 Prerequis :
   - la carte est flashee avec l'environnement 'factory' :
@@ -118,7 +118,7 @@ def provision(port, tier, order="", baud=115200, expect_mac="", log=print):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Provisionne une carte Aptatio ECU.")
+    ap = argparse.ArgumentParser(description="Provisionne une carte TTP ECU.")
     ap.add_argument("--port", required=True, help="port serie (COM5, /dev/ttyUSB0, ...)")
     ap.add_argument("--tier", required=True, help="BASIC | TRACK | PRO")
     ap.add_argument("--order", default="", help="reference de commande (journal)")

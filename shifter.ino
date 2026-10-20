@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- *  PROJET : Aptatio ECU 50cc 2T (PVL) - Shifter / Launch / Slip / Pit limiter
+ *  PROJET : TTP ECU 50cc 2T (PVL) - Shifter / Launch / Slip / Pit limiter
  *  VERSION: 23.0  (refonte modulaire + durcissement WiFi/licence + OTA)
  * ============================================================================
  *
@@ -51,7 +51,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(50);
-  Serial.printf("\n[BOOT] Aptatio ECU v%s (%s)\n", FW_VERSION, FW_BUILD);
+  Serial.printf("\n[BOOT] TTP ECU v%s (%s)\n", FW_VERSION, FW_BUILD);
 
   // Watchdog materiel : configure ici, mais on n'arme la tache loop()
   // qu'a la FIN de setup() (l'init WiFi peut etre lente et ne doit pas

@@ -22,6 +22,13 @@ void sseTask(void*) {
     vTaskDelay(pdMS_TO_TICKS(cfg::SSE_PERIOD_MS));
 
     if (web::sseClients() > 0) {
+      // Telemetrie temps reel + data-log : reservee a la licence PRO. En dessous, aucune valeur capteur.
+      if (license::tier() < LicenseTier::Pro) {
+        snprintf(buf, sizeof(buf), "{\"tier\":\"%s\",\"locked\":true}", toString(license::tier()));
+        web::sseSend(buf, "telemetry");
+        esp_task_wdt_reset();
+        continue;
+      }
       int frontX10, rearX10, slipX10, slipRateX10, rollX10, latGx100, waterX10;
       bool imuOk, waterOk;
       state::getSpeeds(frontX10, rearX10);

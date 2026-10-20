@@ -36,7 +36,7 @@ void net::begin() {
   s_hwid = WiFi.macAddress();
   String sfx = s_hwid;
   sfx.replace(":", "");
-  s_ssid = "AptatioECU-" + sfx.substring(6);  // 6 derniers octets hex
+  s_ssid = "TTPECU-" + sfx.substring(6);  // 6 derniers octets hex
 
   s_apPw = sim::apPasswordOverride();          // fixe en mode simulation, "" sinon
   if (s_apPw.length() < 8) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fenetre de programmation d'une carte Aptatio ECU.
+"""Fenetre de programmation d'une carte TTP ECU.
 
     python tools/license_gui.py
 
@@ -34,7 +34,7 @@ except ImportError:  # pyserial deja exige par provision
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Aptatio ECU - Programmation carte")
+        self.title("TTP ECU - Programmation carte")
         self.resizable(False, False)
         pad = {"padx": 10, "pady": 4}
 

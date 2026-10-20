@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generateur de cles de licence Aptatio ECU.
+"""Generateur de cles de licence TTP ECU.
 
     cle = HEX_MAJ( HMAC-SHA256( SECRET, "<MAC>:<tier>" ) )[0 .. LICENSE_KEY_HEX_LEN-1]
 
@@ -69,7 +69,7 @@ def parse_tier(s: str) -> int:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Genere une cle de licence Aptatio ECU.")
+    ap = argparse.ArgumentParser(description="Genere une cle de licence TTP ECU.")
     ap.add_argument("mac", help="adresse MAC de la carte (HWID affiche par la carte)")
     ap.add_argument("tier", nargs="?", default="PRO", help="BASIC | TRACK | PRO (defaut PRO)")
     ap.add_argument("--all", action="store_true", help="affiche les 3 cles pour cette carte")

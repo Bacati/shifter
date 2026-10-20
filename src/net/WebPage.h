@@ -11,7 +11,7 @@
 static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 <!DOCTYPE html><html lang="fr"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Aptatio ECU</title>
+<title>TTP ECU</title>
 <style>
   body{font-family:Arial,Helvetica,sans-serif;background:#111;color:#eee;margin:0;padding:18px 12px;text-align:center}
   h1{color:#f39c12;margin:0 0 4px}
@@ -36,7 +36,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   progress{width:100%;margin-top:10px}
 </style>
 </head><body>
-<h1>Aptatio ECU</h1>
+<h1>TTP ECU</h1>
 <div class="tier" id="tier">Licence: &mdash;</div>
 
 <div class="card">
@@ -199,6 +199,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
     es.addEventListener('telemetry',function(e){
       try{
         var d=JSON.parse(e.data);
+        if(d.locked){
+          $('tier').textContent='Licence: '+d.tier;
+          $('imuState').textContent='Télémétrie temps réel et data-log : réservés à la version PRO';
+          $('waterState').textContent='';
+          return;
+        }
         $('rpm').textContent=d.rpm;
         $('spd').textContent=(+d.speed).toFixed(1);
         $('slip').textContent=(+d.slip).toFixed(1);

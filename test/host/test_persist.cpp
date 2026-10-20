@@ -240,7 +240,7 @@ TEST(reseau_mot_de_passe_ap_genere_persiste_et_reutilise) {
 TEST(reseau_ssid_et_hwid) {
   boot(); host::wifiMac = "AA:BB:CC:11:22:33"; net::begin();
   CHECK(net::hwid() == "AA:BB:CC:11:22:33");
-  CHECK(net::ssid() == "AptatioECU-112233");
+  CHECK(net::ssid() == "TTPECU-112233");
 }
 TEST(reseau_rotation_mot_de_passe_differe) {
   boot(); net::begin(); String before = net::apPassword();

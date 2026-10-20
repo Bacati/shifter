@@ -1,4 +1,4 @@
-# Aptatio ECU 50cc 2T — Build, câblage & sécurité
+# TTP ECU 50cc 2T — Build, câblage & sécurité
 
 `README.md` contient le dossier de conception. Ce fichier couvre la mise en œuvre
 technique de la **V23.0** (refonte modulaire).
@@ -145,7 +145,7 @@ garde-fou anti-angle — **test uniquement**, jamais en production).
 Au démarrage, le port série (115200) affiche :
 
 ```
-  WiFi SSID : AptatioECU-XXXXXX
+  WiFi SSID : TTPECU-XXXXXX
   WiFi PASS : <12 caractères générés au 1er boot, stockés en NVS>
   IP        : 192.168.4.1
   CONFIG PIN: <6 chiffres, régénéré à CHAQUE boot>
@@ -164,7 +164,7 @@ Au démarrage, le port série (115200) affiche :
 |---|---|---|---|
 | GET | `/` | — | page statique (aucune substitution serveur) |
 | GET | `/api/state` | — | JSON config + tier + ssid + hwid + flags |
-| GET | `/events` | — | flux SSE télémétrie |
+| GET | `/events` | — | flux SSE télémétrie (valeurs : PRO ; sinon trame `locked`) |
 | POST | `/api/login` | — | `pin=` → `{token,ttl}` ; rate-limité |
 | POST | `/api/config` | **Bearer** | champs `launchRpm`/`maxSlipPercent` → 403 si tier insuffisant |
 | POST | `/api/license` | rate-limité | `key=` ; lockout 5 min après 8 échecs ; reboot au succès |
